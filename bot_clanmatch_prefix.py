@@ -8,7 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ----------------------------
-# Google Sheets setup (Render-safe)
+# Google Sheets setup
 # ----------------------------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
 if not CREDS_JSON:
@@ -18,7 +18,8 @@ SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 if not SHEET_ID:
     raise RuntimeError("Missing GOOGLE_SHEET_ID env var")
 
-WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "Mirralith")
+# Your worksheet/tab name
+WORKSHEET_NAME = "bot_info"
 
 # Build credentials & client
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -53,7 +54,7 @@ async def on_ready():
 @bot.command(name="clanmatch")
 async def clanmatch(ctx, *, query: str = None):
     """
-    Look up clans or members from the Google Sheet.
+    Look up clans or members from the Google Sheet (tab: bot_info).
     Example: !clanmatch Invictus
     """
     try:
@@ -82,7 +83,7 @@ async def clanmatch(ctx, *, query: str = None):
     )
 
     for row in matches:
-        # Adjust fields based on your sheet’s headers
+        # Adjust field names to your Google Sheet headers
         clan = row.get("Clan Name", "Unknown Clan")
         level = row.get("Level", "n/a")
         reqs = row.get("Requirements", "n/a")
