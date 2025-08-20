@@ -74,11 +74,20 @@ IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
 # AC / AD / AE add-ons
 IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
 
-# ------------------- Matching helpers -------------------
+# ------------------- Helpers -------------------
 def norm(s: str) -> str:
     return (s or "").strip().upper()
 
-TOKEN_MAP = {"EASY":"ESY","NORMAL":"NML","HARD":"HRD","BRUTAL":"BTL","NM":"NM","UNM":"UNM","ULTRA-NIGHTMARE":"UNM"}
+def is_header_row(row) -> bool:
+    """Detect and ignore header/label rows that look like CLAN/TAG/Spots."""
+    b = norm(row[COL_B_CLAN]) if len(row) > COL_B_CLAN else ""
+    c = norm(row[COL_C_TAG])  if len(row) > COL_C_TAG  else ""
+    e = norm(row[COL_E_SPOTS]) if len(row) > COL_E_SPOTS else ""
+    return b in {"CLAN", "CLAN NAME"} or c == "TAG" or e == "SPOTS"
+
+TOKEN_MAP = {
+    "EASY":"ESY","NORMAL":"NML","HARD":"HRD","BRUTAL":"BTL","NM":"NM","UNM":"UNM","ULTRA-NIGHTMARE":"UNM"
+}
 def map_token(choice: str) -> str:
     c = norm(choice)
     return TOKEN_MAP.get(c, c)
@@ -88,7 +97,7 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
         return True
     t = map_token(token)
     c = norm(cell_text)
-    return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
+    return (t in c or (t=="HRD" and "HARD" in c) or (t=="NML" and "NORMAL" in c) or (t=="BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
     if expected is None:
@@ -105,7 +114,11 @@ def parse_spots_num(cell_text: str) -> int:
     return int(m.group()) if m else 0
 
 def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
-    if len(row) <= IDX_AB or not (row[COL_B_CLAN] or "").strip():
+    if len(row) <= IDX_AB:
+        return False
+    if is_header_row(row):
+        return False
+    if not (row[COL_B_CLAN] or "").strip():
         return False
     return (
         cell_has_diff(row[COL_P_CB], cb) and
@@ -316,7 +329,7 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -326,12 +339,15 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         # Require at least one filter (including roster mode)
-        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
+        if not any([
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle,
+            self.roster_mode is not None
+        ]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
             return
 
@@ -345,6 +361,8 @@ class ClanMatchView(discord.ui.View):
         matches = []
         for row in rows[1:]:
             try:
+                if is_header_row(row):
+                    continue
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     spots_num = parse_spots_num(row[COL_E_SPOTS])
                     if self.roster_mode == "open" and spots_num <= 0:
@@ -359,7 +377,9 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send("No matching clans found. Try a different combo.")
             return
 
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
+        filters_text = format_filters_footer(
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+        )
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
             embeds = [make_embed_for_row(r, filters_text) for r in chunk]
