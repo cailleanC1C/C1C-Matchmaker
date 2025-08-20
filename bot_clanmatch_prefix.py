@@ -1,7 +1,6 @@
 # bot_clanmatch_prefix.py
 
-import os, json, time, asyncio, re, traceback, urllib.parse
-import io
+import os, json, time, asyncio, re, traceback, urllib.parse, io
 import discord
 from discord.ext import commands
 from discord import InteractionResponded
@@ -21,8 +20,13 @@ SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# public base URL to serve padded images from (Render usually sets RENDER_EXTERNAL_URL)
+# Public base URL for proxying padded emoji images
 BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
+# Padded-emoji tunables
+EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
+EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
+STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: no raw fallback
 
 if not CREDS_JSON:
     print("[boot] GSPREAD_CREDENTIALS missing", flush=True)
@@ -146,8 +150,8 @@ def emoji_for_tag(guild: discord.Guild | None, tag: str | None):
         return None
     return get(guild.emojis, name=tag.strip())
 
-# ----- NEW: padded emoji URL helper -----
-def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int = 128, box: float = 0.72) -> str | None:
+# ----- padded emoji URL helper (proxy only) -----
+def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | None = None, box: float | None = None) -> str | None:
     """
     Build a URL to our /emoji-pad proxy that fetches the discord emoji, pads it into a square
     with consistent transparent margins, and returns a PNG. If BASE_URL missing or no emoji, None.
@@ -161,6 +165,8 @@ def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int = 1
     base = BASE_URL
     if not base:
         return None
+    size = size or EMOJI_PAD_SIZE
+    box  = box  or EMOJI_PAD_BOX
     q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box)})
     return f"{base.rstrip('/')}/emoji-pad?{q}"
 
@@ -218,14 +224,13 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
-    # Use padded proxy if possible; fallback to raw emoji URL
-    thumb = padded_emoji_url(guild, tag, size=256, box=0.90)
-    if not thumb:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            thumb = str(em.url)
+    thumb = padded_emoji_url(guild, tag)
     if thumb:
         e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            e.set_thumbnail(url=str(em.url))
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
@@ -273,13 +278,13 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
 
     e = discord.Embed(title=title, description="\n".join(lines))
 
-    thumb = padded_emoji_url(guild, c, size=128, box=0.72)
-    if not thumb:
-        em = emoji_for_tag(guild, c)
-        if em:
-            thumb = str(em.url)
+    thumb = padded_emoji_url(guild, c)
     if thumb:
         e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, c)
+        if em:
+            e.set_thumbnail(url=str(em.url))
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
@@ -306,7 +311,7 @@ class ClanMatchView(discord.ui.View):
         self.embed_variant = embed_variant  # "classic" or "search"
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
-        self.roster_mode: str | None = None   # None = All, 'open' = Spots > 0, 'full' = Spots <= 0
+        self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
         self.message: discord.Message | None = None  # set after sending
 
     async def on_timeout(self):
@@ -538,7 +543,7 @@ async def clansearch_cmd(ctx: commands.Context):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
 
-# ------------------- Clan profile command (optional, from earlier step) -------------------
+# ------------------- Clan profile command -------------------
 def find_clan_row(query: str):
     if not query:
         return None
@@ -554,7 +559,7 @@ def find_clan_row(query: str):
         tag  = (row[COL_C_TAG]  or "").strip()
         if not name and not tag:
             continue
-        nU, tU = name.upper(), tag.upper()
+        nU, tU = (name.upper(), tag.upper())
         if q == tU:
             exact_tag = row; break
         if q == nU and exact_name is None:
@@ -564,7 +569,7 @@ def find_clan_row(query: str):
     return exact_tag or exact_name or (partials[0] if partials else None)
 
 def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
-    # --- top line ---
+    # Top line with rank fallback
     rank_raw = (row[COL_A_RANK] or "").strip()
     rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
 
@@ -572,22 +577,22 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
     tag   = (row[COL_C_TAG]         or "").strip()
     lvl   = (row[COL_D_LEVEL]       or "").strip()
 
-    # --- leadership ---
+    # Leadership
     lead  = (row[COL_G_LEAD]        or "").strip()
     deps  = (row[COL_H_DEPUTIES]    or "").strip()
 
-    # --- ranges ---
+    # Ranges
     cb    = (row[COL_M_CB]          or "").strip()
     hydra = (row[COL_N_HYDRA]       or "").strip()
     chim  = (row[COL_O_CHIMERA]     or "").strip()
 
-    # --- CvC / Siege ---
+    # CvC / Siege
     cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
     cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
     sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
     sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
 
-    # --- footer bits ---
+    # Footer
     prog  = (row[COL_F_PROGRESSION] or "").strip()
     style = (row[COL_U_STYLE]       or "").strip()
 
@@ -611,17 +616,15 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
 
     e = discord.Embed(title=title, description="\n".join(lines))
 
-    # aligned, padded thumbnail (bump box to 0.90/size to 256 if you want them bigger)
-    thumb = padded_emoji_url(guild, tag, size=256, box=0.90)
-    if not thumb:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            thumb = str(em.url)
+    thumb = padded_emoji_url(guild, tag)
     if thumb:
         e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            e.set_thumbnail(url=str(em.url))
 
     return e
-
 
 @bot.command(name="clanprofile", aliases=["clan", "cp"])
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
@@ -695,8 +698,8 @@ async def emoji_pad_handler(request: web.Request):
     centers onto an s×s transparent canvas, returns PNG.
     """
     src = request.query.get("u")
-    size = int(request.query.get("s", "128"))
-    box  = float(request.query.get("box", "0.72"))
+    size = int(request.query.get("s", str(EMOJI_PAD_SIZE)))
+    box  = float(request.query.get("box", str(EMOJI_PAD_BOX)))
     if not src:
         return web.Response(status=400, text="missing u")
     try:
@@ -755,5 +758,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
