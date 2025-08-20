@@ -3,11 +3,14 @@
 import os, json, time, asyncio, re, traceback
 import discord
 from discord.ext import commands
+from discord import app_commands, InteractionResponded
 from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
 from aiohttp import web
-from discord import InteractionResponded
+
+# ------------------- boot/uptime -------------------
+START_TS = time.time()
 
 # ------------------- ENV -------------------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
@@ -21,25 +24,46 @@ if not SHEET_ID:
     print("[boot] GOOGLE_SHEET_ID missing", flush=True)
 print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
 
-# ------------------- Sheets (lazy) -------------------
+# ------------------- Sheets (lazy + cache) -------------------
 _gc = None
 _ws = None
+_cache_rows = None
+_cache_time = 0.0
+CACHE_TTL = 60  # seconds
 
-def get_ws():
-    """Connect to Google Sheets only when needed. Raises with a clear log."""
+def _fmt_uptime():
+    secs = int(time.time() - START_TS)
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def get_ws(force=False):
+    """Connect to Google Sheets only when needed."""
     global _gc, _ws
+    if force:
+        _ws = None
     if _ws is not None:
         return _ws
-    try:
-        creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
-        _gc = gspread.authorize(creds)
-        _ws = _gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
-        print("[sheets] Connected to worksheet OK", flush=True)
-        return _ws
-    except Exception as e:
-        print("[sheets] ERROR opening worksheet:", e, flush=True)
-        traceback.print_exc()
-        raise
+    creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+    _gc = gspread.authorize(creds)
+    _ws = _gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
+    print("[sheets] Connected to worksheet OK", flush=True)
+    return _ws
+
+def get_rows(force=False):
+    """Return all rows with simple 60s cache."""
+    global _cache_rows, _cache_time
+    if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
+        ws = get_ws(force=False)
+        _cache_rows = ws.get_all_values()
+        _cache_time = time.time()
+    return _cache_rows
+
+def clear_cache():
+    global _cache_rows, _cache_time, _ws
+    _cache_rows = None
+    _cache_time = 0.0
+    _ws = None  # reconnect next time
 
 # ------------------- Column map (0-based) -------------------
 COL_B_CLAN, COL_C_TAG, COL_E_SPOTS = 1, 2, 4
@@ -93,9 +117,9 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 # ------------------- Formatting -------------------
 def build_entry_criteria(row) -> str:
     parts = []
-    v = row[IDX_V].strip(); w = row[IDX_W].strip()
-    x = row[IDX_X].strip(); y = row[IDX_Y].strip(); z = row[IDX_Z].strip()
-    aa = row[IDX_AA].strip(); ab = row[IDX_AB].strip()
+    v = (row[IDX_V] or "").strip(); w = (row[IDX_W] or "").strip()
+    x = (row[IDX_X] or "").strip(); y = (row[IDX_Y] or "").strip(); z = (row[IDX_Z] or "").strip()
+    aa = (row[IDX_AA] or "").strip(); ab = (row[IDX_AB] or "").strip()
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -135,7 +159,7 @@ LAST_CALL = defaultdict(float)
 ACTIVE_PANELS = {}
 COOLDOWN_SEC = 2.0
 
-CB_CHOICES        = ["Easy", "Normal","Hard", "Brutal", "NM", "UNM"]
+CB_CHOICES        = ["Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM", "UNM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
@@ -143,17 +167,33 @@ PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Hide full, Reset, Search)."""
     def __init__(self, author_id: int):
-        super().__init__(timeout=600)
+        super().__init__(timeout=1800)  # 30 min, was 600
         self.author_id = author_id
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
         self.hide_full = False
+        self.message: discord.Message | None = None  # set after sending
 
+    # on-timeout: disable + mark expired
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message:
+                expired = discord.Embed(
+                    title="Find a C1C Clan",
+                    description="⏳ Panel expired. Run `!clanmatch` to open a fresh one."
+                )
+                await self.message.edit(embed=expired, view=self)
+        except Exception as e:
+            print("[view timeout] failed to edit:", e)
+
+    # visual sync so selects and toggles reflect current state
     def _sync_visuals(self):
         for child in self.children:
             if isinstance(child, discord.ui.Select):
                 chosen = None
-                ph = child.placeholder or ""
+                ph = (child.placeholder or "")
                 if "CB Difficulty" in ph: chosen = self.cb
                 elif "Hydra Difficulty" in ph: chosen = self.hydra
                 elif "Chimera Difficulty" in ph: chosen = self.chimera
@@ -215,30 +255,24 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="CvC: —", style=discord.ButtonStyle.secondary, row=4)
     async def toggle_cvc(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.cvc = self._cycle(self.cvc)
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
+        self.cvc = self._cycle(self.cvc); self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Siege: —", style=discord.ButtonStyle.secondary, row=4)
     async def toggle_siege(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.siege = self._cycle(self.siege)
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
+        self.siege = self._cycle(self.siege); self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Hide full: Off", style=discord.ButtonStyle.secondary, row=4, custom_id="hide_full_btn")
     async def toggle_hide_full(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.hide_full = not self.hide_full
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
+        self.hide_full = not self.hide_full; self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -246,10 +280,9 @@ class ClanMatchView(discord.ui.View):
         self.cvc = self.siege = None
         self.hide_full = False
         self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
+        try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -259,8 +292,7 @@ class ClanMatchView(discord.ui.View):
 
         await itx.response.defer(thinking=True)  # public results
         try:
-            ws = get_ws()
-            rows = ws.get_all_values()
+            rows = get_rows(force=False)
         except Exception as e:
             await itx.followup.send(f"❌ Failed to read sheet: {e}")
             return
@@ -294,18 +326,24 @@ async def clanmatch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-    old_id = ACTIVE_PANELS.pop(ctx.author.id, None)
+    view = ClanMatchView(author_id=ctx.author.id)
+    view._sync_visuals()
+    embed = discord.Embed(title="Find a C1C Clan for your recruit", description="Pick any filters (you can leave some blank) and click **Search Clans**.
+**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. Too many filters might narrow things down to zero")
+
+    # edit-in-place if a panel exists
+    old_id = ACTIVE_PANELS.get(ctx.author.id)
     if old_id:
         try:
-            old_msg = await ctx.channel.fetch_message(old_id)
-            await old_msg.delete()
+            msg = await ctx.channel.fetch_message(old_id)
+            view.message = msg
+            await msg.edit(embed=embed, view=view)
+            return
         except Exception:
             pass
 
-    view = ClanMatchView(author_id=ctx.author.id)
-    view._sync_visuals()
-    embed = discord.Embed(title="Find a C1C Clan", description="Pick at least one filter and click **Search Clans**.")
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
+    view.message = sent  # so on_timeout can edit
     ACTIVE_PANELS[ctx.author.id] = sent.id
 
 @clanmatch_cmd.error
@@ -317,13 +355,57 @@ async def clanmatch_error(ctx, error):
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
+# Health (prefix)
+@bot.command(name="health")
+async def health_prefix(ctx):
+    await ctx.trigger_typing()
+    # try a very light sheets check
+    try:
+        ws = get_ws(force=False)
+        _ = ws.row_values(1)
+        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+    except Exception as e:
+        sheets_status = f"ERROR: {e.__class__.__name__}"
+    latency_ms = int(bot.latency * 1000) if bot.latency else -1
+    await ctx.send(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}")
+
+# Reload cache
+@bot.command(name="reload")
+async def reload_cache(ctx):
+    clear_cache()
+    await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
+
+# Health (slash)
+@bot.tree.command(name="health", description="Bot & Sheets status")
+async def health_slash(itx: discord.Interaction):
+    await itx.response.defer(thinking=False, ephemeral=False)
+    try:
+        ws = get_ws(force=False)
+        _ = ws.row_values(1)
+        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+    except Exception as e:
+        sheets_status = f"ERROR: {e.__class__.__name__}"
+    latency_ms = int(bot.latency * 1000) if bot.latency else -1
+    await itx.followup.send(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}")
+
+# ------------------- Events -------------------
+@bot.event
+async def on_ready():
+    print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
+    # sync slash commands (so /health shows up)
+    try:
+        synced = await bot.tree.sync()
+        print(f"[slash] synced {len(synced)} commands", flush=True)
+    except Exception as e:
+        print(f"[slash] sync failed: {e}", flush=True)
+
 # ------------------- Tiny web server (Render port) -------------------
-async def _health(_req): return web.Response(text="ok")
+async def _health_http(_req): return web.Response(text="ok")
 
 async def start_webserver():
     app = web.Application()
-    app.router.add_get("/", _health)
-    app.router.add_get("/health", _health)
+    app.router.add_get("/", _health_http)
+    app.router.add_get("/health", _health_http)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", "10000"))
@@ -347,4 +429,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
