@@ -6,6 +6,7 @@ from discord.ext import commands
 from discord import app_commands, InteractionResponded
 from collections import defaultdict
 import gspread
+from google.oauth2.google_auth_oauthlib import flow  # not used, but avoid accidental import errors
 from google.oauth2.service_account import Credentials
 from aiohttp import web
 
@@ -118,18 +119,30 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 
 # ------------------- Formatting -------------------
 def build_entry_criteria(row) -> str:
+    """
+    V/W labeled (bold); X/Y/Z verbatim; AA/AB labeled (bold).
+    Add spacing between items via NBSP around the pipe.
+    """
+    NBSP_PIPE = "\u00A0|\u00A0"  # non-breaking space on both sides of |
     parts = []
-    v = (row[IDX_V] or "").strip(); w = (row[IDX_W] or "").strip()
-    x = (row[IDX_X] or "").strip(); y = (row[IDX_Y] or "").strip(); z = (row[IDX_Z] or "").strip()
-    aa = (row[IDX_AA] or "").strip(); ab = (row[IDX_AB] or "").strip()
-    if v:  parts.append(f"Hydra keys: {v}")
-    if w:  parts.append(f"Chimera keys: {w}")
+
+    v = (row[IDX_V] or "").strip()   # Hydra keys
+    w = (row[IDX_W] or "").strip()   # Chimera keys
+    x = (row[IDX_X] or "").strip()   # Hydra Clash (verbatim)
+    y = (row[IDX_Y] or "").strip()   # Chimera Clash (verbatim)
+    z = (row[IDX_Z] or "").strip()   # CB Damage (verbatim)
+    aa = (row[IDX_AA] or "").strip() # non PR CvC
+    ab = (row[IDX_AB] or "").strip() # PR CvC
+
+    if v:  parts.append(f"**Hydra keys:** {v}")
+    if w:  parts.append(f"**Chimera keys:** {w}")
     if x:  parts.append(x)
     if y:  parts.append(y)
     if z:  parts.append(z)
-    if aa: parts.append(f"non PR CvC: {aa}")
-    if ab: parts.append(f"PR CvC: {ab}")
-    return "**Entry Criteria:** " + (" | ".join(parts) if parts else "—")
+    if aa: parts.append(f"**non PR CvC:** {aa}")
+    if ab: parts.append(f"**PR CvC:** {ab}")
+
+    return "**Entry Criteria:** " + (NBSP_PIPE.join(parts) if parts else "—")
 
 def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) -> str:
     parts = []
@@ -143,7 +156,7 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) 
     return " • ".join(parts)
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    """Header shows Reserved (AC) when present; body adds AE and AD lines."""
+    """Header shows Reserved (AC) when present; body adds AE and AD lines with bold labels."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
@@ -157,9 +170,9 @@ def make_embed_for_row(row, filters_text: str) -> discord.Embed:
 
     lines = [build_entry_criteria(row)]
     if addl_req:
-        lines.append(f"Additional Requirements: {addl_req}")
+        lines.append(f"**Additional Requirements:** {addl_req}")
     if comments:
-        lines.append(f"Clan Needs/Comments: {comments}")
+        lines.append(f"**Clan Needs/Comments:** {comments}")
 
     e = discord.Embed(title=title, description="\n".join(lines))
     e.set_footer(text=f"Filters used: {filters_text}")
