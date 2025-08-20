@@ -1,8 +1,9 @@
 # bot_clanmatch_prefix.py
 
-import os, json
+import os, json, time
 import discord
 from discord.ext import commands
+from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -21,7 +22,7 @@ gc = gspread.authorize(creds)
 ws = gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
 
 # ---------- Column map (0-based) ----------
-COL_B_CLAN, COL_C_TAG, COL_D_SPOTS = 1, 2, 3
+COL_B_CLAN, COL_C_TAG, COL_E_SPOTS = 1, 2, 4
 # Filters P–U
 COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
 # Entry Criteria V–AB
@@ -40,7 +41,7 @@ def map_token(choice: str) -> str:
     return TOKEN_MAP.get(c, c)
 
 def cell_has_diff(cell_text: str, token: str | None) -> bool:
-    """P/Q/R: comma-style token matching; if token is None, pass."""
+    """P/Q/R contain tokens; match mapped token (skip if filter None)."""
     if not token:
         return True
     t = map_token(token)
@@ -48,7 +49,7 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
     return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
-    """S/T exact 1 or 0; if filter None, pass."""
+    """S/T are exact 1 or 0; skip if filter None."""
     if expected is None:
         return True
     return (cell_text or "").strip() == expected
@@ -72,7 +73,9 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 
 # ---------- Formatting ----------
 def build_entry_criteria(row) -> str:
-    """V/W labeled; X/Y/Z raw; AA/AB labeled; echo exact cell text. Bold only prefix."""
+    """
+    V/W labeled; X/Y/Z raw; AA/AB labeled; echo exact cell content. Bold only the prefix.
+    """
     parts = []
     v = row[IDX_V].strip()
     w = row[IDX_W].strip()
@@ -81,7 +84,6 @@ def build_entry_criteria(row) -> str:
     z = row[IDX_Z].strip()
     aa = row[IDX_AA].strip()
     ab = row[IDX_AB].strip()
-
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -89,14 +91,7 @@ def build_entry_criteria(row) -> str:
     if z:  parts.append(z)
     if aa: parts.append(f"non PR CvC: {aa}")
     if ab: parts.append(f"PR CvC: {ab}")
-
     return "**Entry Criteria:** " + (" | ".join(parts) if parts else "—")
-
-def format_row_block(row) -> str:
-    clan  = row[COL_B_CLAN].strip()
-    tag   = row[COL_C_TAG].strip()
-    spots = row[COL_D_SPOTS].strip()
-    return f"**{clan}**  `{tag}`  — Spots: {spots}\n{build_entry_criteria(row)}"
 
 def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle) -> str:
     parts = []
@@ -108,10 +103,26 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle) -> str:
     if playstyle: parts.append(f"Playstyle: {playstyle}")
     return " • ".join(parts) if parts else "—"
 
+def make_embed_for_row(row, filters_text: str) -> discord.Embed:
+    """First line as big title; entry criteria in description."""
+    clan  = row[COL_B_CLAN].strip()
+    tag   = row[COL_C_TAG].strip()
+    spots = row[COL_E_SPOTS].strip()
+    title = f"{clan}  `{tag}`  — Spots: {spots}"
+    desc  = build_entry_criteria(row)
+    e = discord.Embed(title=title, description=desc)
+    e.set_footer(text=f"Filters used: {filters_text}")
+    return e
+
 # ---------- Discord bot ----------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# anti-dupe guard (one panel per user + short cooldown)
+LAST_CALL = defaultdict(float)   # user_id -> timestamp
+ACTIVE_PANELS = {}               # user_id -> message_id
+COOLDOWN_SEC = 2.0
 
 CB_CHOICES        = ["Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM", "UNM"]
@@ -122,7 +133,7 @@ class ClanMatchView(discord.ui.View):
     """
     5 Discord UI rows max:
       rows 0–3 => 4 selects
-      row 4    => CvC toggle, Siege toggle, Search button (3 buttons share the row)
+      row 4    => CvC toggle, Siege toggle, Search button
     """
     def __init__(self, author_id: int):
         super().__init__(timeout=600)
@@ -215,8 +226,9 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send(f"❌ Failed to read sheet: {e}", ephemeral=True)
             return
 
+        data_rows = rows[1:]
         matches = []
-        for row in rows[1:]:
+        for row in data_rows:
             try:
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     matches.append(row)
@@ -228,26 +240,42 @@ class ClanMatchView(discord.ui.View):
             return
 
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle)
-        chunks = [matches[i:i+10] for i in range(0, len(matches), 10)]
-        for idx, chunk in enumerate(chunks, start=1):
-            desc = "\n\n".join(format_row_block(r) for r in chunk)
-            embed = discord.Embed(title=f"Clan Matches (page {idx}/{len(chunks)})", description=desc)
-            embed.set_footer(text=f"Filters used: {filters_text}")
-            await itx.followup.send(embed=embed, ephemeral=True)
+        # send in pages, up to 10 embeds per message
+        for i in range(0, len(matches), 10):
+            chunk = matches[i:i+10]
+            embeds = [make_embed_for_row(r, filters_text) for r in chunk]
+            await itx.followup.send(embeds=embeds, ephemeral=True)
 
 # ---------- Commands ----------
+@commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
+    now = time.time()
+    if now - LAST_CALL[ctx.author.id] < COOLDOWN_SEC:
+        return
+    LAST_CALL[ctx.author.id] = now
+
+    # ensure single active panel per user
+    old_id = ACTIVE_PANELS.pop(ctx.author.id, None)
+    if old_id:
+        try:
+            old_msg = await ctx.channel.fetch_message(old_id)
+            await old_msg.delete()
+        except Exception:
+            pass
+
     view = ClanMatchView(author_id=ctx.author.id)
     embed = discord.Embed(
         title="Find a C1C Clan",
-        description=(
-            "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
-            "Filters checked: **P–U** (CB/Hydra/Chimera + CvC(1/0) + Siege(1/0) + Playstyle)\n"
-            "Output: **B/C/D** + **V–AB** as Entry Criteria."
-        )
+        description="Pick any filters (you can leave some blank) and click **Search Clans**."
     )
-    await ctx.reply(embed=embed, view=view, mention_author=False)
+    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
+    ACTIVE_PANELS[ctx.author.id] = sent.id
+
+@clanmatch_cmd.error
+async def clanmatch_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        return
 
 @bot.command(name="ping")
 async def ping(ctx):
