@@ -564,19 +564,30 @@ def find_clan_row(query: str):
     return exact_tag or exact_name or (partials[0] if partials else None)
 
 def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
-    rank  = (row[COL_A_RANK]        or "").strip()
+    # --- top line ---
+    rank_raw = (row[COL_A_RANK] or "").strip()
+    rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
+
     name  = (row[COL_B_CLAN]        or "").strip()
     tag   = (row[COL_C_TAG]         or "").strip()
     lvl   = (row[COL_D_LEVEL]       or "").strip()
+
+    # --- leadership ---
     lead  = (row[COL_G_LEAD]        or "").strip()
     deps  = (row[COL_H_DEPUTIES]    or "").strip()
+
+    # --- ranges ---
     cb    = (row[COL_M_CB]          or "").strip()
     hydra = (row[COL_N_HYDRA]       or "").strip()
     chim  = (row[COL_O_CHIMERA]     or "").strip()
+
+    # --- CvC / Siege ---
     cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
     cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
     sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
     sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
+
+    # --- footer bits ---
     prog  = (row[COL_F_PROGRESSION] or "").strip()
     style = (row[COL_U_STYLE]       or "").strip()
 
@@ -595,11 +606,13 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
         "",
     ]
     tail = " | ".join([p for p in [prog, style] if p])
-    if tail: lines.append(tail)
+    if tail:
+        lines.append(tail)
 
     e = discord.Embed(title=title, description="\n".join(lines))
 
-    thumb = padded_emoji_url(guild, tag, size=128, box=0.72)
+    # aligned, padded thumbnail (bump box to 0.90/size to 256 if you want them bigger)
+    thumb = padded_emoji_url(guild, tag, size=256, box=0.90)
     if not thumb:
         em = emoji_for_tag(guild, tag)
         if em:
@@ -608,6 +621,7 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
         e.set_thumbnail(url=thumb)
 
     return e
+
 
 @bot.command(name="clanprofile", aliases=["clan", "cp"])
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
@@ -741,4 +755,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
