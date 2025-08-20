@@ -3,7 +3,7 @@
 import os, json, time, asyncio, re, traceback
 import discord
 from discord.ext import commands
-from discord import app_commands, InteractionResponded
+from discord import InteractionResponded
 from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
@@ -54,7 +54,7 @@ def get_rows(force=False):
     """Return all rows with simple 60s cache."""
     global _cache_rows, _cache_time
     if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
-        ws = get_ws(False)
+        ws = get_ws(force=False)
         _cache_rows = ws.get_all_values()
         _cache_time = time.time()
     return _cache_rows
@@ -88,7 +88,7 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
         return True
     t = map_token(token)
     c = norm(cell_text)
-    return (t in c or (t=="HRD" and "HARD" in c) or (t=="NML" and "NORMAL" in c) or (t=="BTL" and "BRUTAL" in c))
+    return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
     if expected is None:
@@ -119,31 +119,31 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 # ------------------- Formatting -------------------
 def build_entry_criteria(row) -> str:
     """
-    V/W labeled (bold); X/Y/Z verbatim; AA/AB labeled (bold).
+    V/W labeled (not bold); X/Y/Z verbatim; AA/AB labeled (not bold).
     Wider spacing between items via NBSP around the pipe.
     """
-    NBSP_PIPE = "\u00A0|\u00A0"  # non-breaking space on both sides of |
+    NBSP_PIPE = "\u00A0|\u00A0"  # non-breaking spaces around the pipe
     parts = []
 
-    v = (row[IDX_V] or "").strip()   # Hydra keys
-    w = (row[IDX_W] or "").strip()   # Chimera keys
-    x = (row[IDX_X] or "").strip()   # Hydra Clash (verbatim)
-    y = (row[IDX_Y] or "").strip()   # Chimera Clash (verbatim)
-    z = (row[IDX_Z] or "").strip()   # CB Damage (verbatim)
-    aa = (row[IDX_AA] or "").strip() # non PR CvC
-    ab = (row[IDX_AB] or "").strip() # PR CvC
+    v  = (row[IDX_V]  or "").strip()   # Hydra keys
+    w  = (row[IDX_W]  or "").strip()   # Chimera keys
+    x  = (row[IDX_X]  or "").strip()   # Hydra Clash (verbatim)
+    y  = (row[IDX_Y]  or "").strip()   # Chimera Clash (verbatim)
+    z  = (row[IDX_Z]  or "").strip()   # CB Damage (verbatim)
+    aa = (row[IDX_AA] or "").strip()   # non PR CvC
+    ab = (row[IDX_AB] or "").strip()   # PR CvC
 
-    if v:  parts.append(f"**Hydra keys:** {v}")
-    if w:  parts.append(f"**Chimera keys:** {w}")
+    if v:  parts.append(f"Hydra keys: {v}")
+    if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
     if y:  parts.append(y)
     if z:  parts.append(z)
-    if aa: parts.append(f"**non PR CvC:** {aa}")
-    if ab: parts.append(f"**PR CvC:** {ab}")
+    if aa: parts.append(f"non PR CvC: {aa}")
+    if ab: parts.append(f"PR CvC: {ab}")
 
     return "**Entry Criteria:** " + (NBSP_PIPE.join(parts) if parts else "—")
 
-def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) -> str:
+def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode) -> str:
     parts = []
     if cb: parts.append(f"CB: {cb}")
     if hydra: parts.append(f"Hydra: {hydra}")
@@ -151,11 +151,13 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) 
     if cvc is not None:   parts.append(f"CvC: {'Yes' if cvc == '1' else 'No'}")
     if siege is not None: parts.append(f"Siege: {'Yes' if siege == '1' else 'No'}")
     if playstyle: parts.append(f"Playstyle: {playstyle}")
-    parts.append(f"Hide full: {'On' if hide_full else 'Off'}")
+
+    roster_text = "All" if roster_mode is None else ("Open only" if roster_mode == "open" else "Full only")
+    parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    """Header shows Reserved (AC) when present; body adds AE and AD with bold labels."""
+    """Header shows Reserved (AC) when present; body adds AE and AD lines with blank-line spacing."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
@@ -167,13 +169,14 @@ def make_embed_for_row(row, filters_text: str) -> discord.Embed:
     if reserved:
         title += f" | Reserved: {reserved}"
 
-    lines = [build_entry_criteria(row)]
+    # Blank line between sections
+    sections = [build_entry_criteria(row)]
     if addl_req:
-        lines.append(f"**Additional Requirements:** {addl_req}")
+        sections.append(f"**Additional Requirements:** {addl_req}")
     if comments:
-        lines.append(f"**Clan Needs/Comments:** {comments}")
+        sections.append(f"**Clan Needs/Comments:** {comments}")
 
-    e = discord.Embed(title=title, description="\n".join(lines))
+    e = discord.Embed(title=title, description="\n\n".join(sections))
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
@@ -192,15 +195,16 @@ CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
-    """4 selects + one row of buttons (CvC, Siege, Hide full, Reset, Search)."""
+    """4 selects + one row of buttons (CvC, Siege, Roster, Reset, Search)."""
     def __init__(self, author_id: int):
         super().__init__(timeout=1800)  # 30 min
         self.author_id = author_id
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
-        self.hide_full = False
+        self.roster_mode: str | None = None   # None = All, 'open' = Spots > 0, 'full' = Spots <= 0
         self.message: discord.Message | None = None  # set after sending
 
+    # on-timeout: disable + mark expired
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
@@ -214,6 +218,7 @@ class ClanMatchView(discord.ui.View):
         except Exception as e:
             print("[view timeout] failed to edit:", e)
 
+    # visual sync so selects and toggles reflect current state
     def _sync_visuals(self):
         for child in self.children:
             if isinstance(child, discord.ui.Select):
@@ -236,9 +241,16 @@ class ClanMatchView(discord.ui.View):
                     child.style = discord.ButtonStyle.success if self.siege == "1" else (
                         discord.ButtonStyle.danger if self.siege == "0" else discord.ButtonStyle.secondary
                     )
-                elif child.custom_id == "hide_full_btn":
-                    child.label = f"Hide full: {'On' if self.hide_full else 'Off'}"
-                    child.style = discord.ButtonStyle.success if self.hide_full else discord.ButtonStyle.secondary
+                elif child.custom_id == "roster_btn":
+                    if self.roster_mode is None:
+                        child.label = "Roster: All"
+                        child.style = discord.ButtonStyle.secondary
+                    elif self.roster_mode == "open":
+                        child.label = "Roster: Open only"
+                        child.style = discord.ButtonStyle.success
+                    else:  # 'full'
+                        child.label = "Roster: Full only"
+                        child.style = discord.ButtonStyle.primary
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
@@ -246,6 +258,7 @@ class ClanMatchView(discord.ui.View):
             return False
         return True
 
+    # Row 0–3: selects
     @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
                        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
@@ -270,6 +283,7 @@ class ClanMatchView(discord.ui.View):
         self.playstyle = select.values[0] if select.values else None
         await itx.response.defer()
 
+    # Row 4: buttons
     def _cycle(self, current):
         return "1" if current is None else ("0" if current == "1" else None)
     def _toggle_label(self, name, value):
@@ -290,9 +304,16 @@ class ClanMatchView(discord.ui.View):
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
-    @discord.ui.button(label="Hide full: Off", style=discord.ButtonStyle.secondary, row=4, custom_id="hide_full_btn")
-    async def toggle_hide_full(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.hide_full = not self.hide_full; self._sync_visuals()
+    @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
+    async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
+        # Cycle: None -> 'open' -> 'full' -> None
+        if self.roster_mode is None:
+            self.roster_mode = "open"
+        elif self.roster_mode == "open":
+            self.roster_mode = "full"
+        else:
+            self.roster_mode = None
+        self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
@@ -301,7 +322,7 @@ class ClanMatchView(discord.ui.View):
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.cb = self.hydra = self.chimera = self.playstyle = None
         self.cvc = self.siege = None
-        self.hide_full = False
+        self.roster_mode = None
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
@@ -309,13 +330,14 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.hide_full]):
+        # Require at least one filter (including roster mode)
+        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
             return
 
         await itx.response.defer(thinking=True)  # public results
         try:
-            rows = get_rows(False)
+            rows = get_rows(force=False)
         except Exception as e:
             await itx.followup.send(f"❌ Failed to read sheet: {e}")
             return
@@ -324,7 +346,10 @@ class ClanMatchView(discord.ui.View):
         for row in rows[1:]:
             try:
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
-                    if self.hide_full and parse_spots_num(row[COL_E_SPOTS]) <= 0:
+                    spots_num = parse_spots_num(row[COL_E_SPOTS])
+                    if self.roster_mode == "open" and spots_num <= 0:
+                        continue
+                    if self.roster_mode == "full" and spots_num > 0:
                         continue
                     matches.append(row)
             except Exception:
@@ -334,7 +359,7 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send("No matching clans found. Try a different combo.")
             return
 
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.hide_full)
+        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
             embeds = [make_embed_for_row(r, filters_text) for r in chunk]
@@ -361,6 +386,7 @@ async def clanmatch_cmd(ctx: commands.Context):
         )
     )
 
+    # Try to edit your previous panel in place; if not found, send a new one
     old_id = ACTIVE_PANELS.get(ctx.author.id)
     if old_id:
         try:
@@ -384,31 +410,36 @@ async def clanmatch_error(ctx, error):
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
+# Health (prefix)
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
+    """Lightweight health check with hard fail-safes."""
     try:
         try:
-            ws = get_ws(False)
-            _ = ws.row_values(1)
+            ws = get_ws(force=False)
+            _ = ws.row_values(1)  # tiny read
             sheets_status = f"OK (`{WORKSHEET_NAME}`)"
         except Exception as e:
             sheets_status = f"ERROR: {type(e).__name__}"
+
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
         msg = f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}"
         await ctx.reply(msg, mention_author=False)
     except Exception as e:
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
+# Reload cache
 @bot.command(name="reload")
 async def reload_cache(ctx):
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
 
+# Health (slash)
 @bot.tree.command(name="health", description="Bot & Sheets status")
 async def health_slash(itx: discord.Interaction):
     await itx.response.defer(thinking=False, ephemeral=False)
     try:
-        ws = get_ws(False)
+        ws = get_ws(force=False)
         _ = ws.row_values(1)
         sheets_status = f"OK (`{WORKSHEET_NAME}`)"
     except Exception as e:
@@ -420,6 +451,7 @@ async def health_slash(itx: discord.Interaction):
 @bot.event
 async def on_ready():
     print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
+    # sync slash commands (so /health shows up)
     try:
         synced = await bot.tree.sync()
         print(f"[slash] synced {len(synced)} commands", flush=True)
