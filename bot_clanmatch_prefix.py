@@ -304,7 +304,7 @@ async def clanmatch_cmd(ctx: commands.Context):
 
     view = ClanMatchView(author_id=ctx.author.id)
     view._sync_visuals()
-    embed = discord.Embed(title="Find a C1C Clan", description="Pick any filters (you can leave some blank) and click **Search Clans**.")
+    embed = discord.Embed(title="Find a C1C Clan", description="Pick at least one filter and click **Search Clans**.")
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
     ACTIVE_PANELS[ctx.author.id] = sent.id
 
@@ -347,3 +347,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
