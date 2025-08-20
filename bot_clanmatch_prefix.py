@@ -4,6 +4,7 @@ import os, json, time, asyncio, re, traceback
 import discord
 from discord.ext import commands
 from discord import InteractionResponded
+from discord.utils import get
 from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
@@ -129,6 +130,13 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
+def emoji_for_tag(guild: discord.Guild | None, tag: str | None) -> str:
+    """Return the emoji mention for a clan tag if present in the guild, else empty string."""
+    if not guild or not tag:
+        return ""
+    e = get(guild.emojis, name=tag.strip())
+    return str(e) if e else ""
+
 # ------------------- Formatting -------------------
 def build_entry_criteria_classic(row) -> str:
     """
@@ -168,7 +176,7 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
 
-def make_embed_for_row_classic(row, filters_text: str) -> discord.Embed:
+def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     """Classic output (used by !clanmatch)."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
@@ -177,7 +185,8 @@ def make_embed_for_row_classic(row, filters_text: str) -> discord.Embed:
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
-    title = f"{clan}  `{tag}`  — Spots: {spots}"
+    emj   = emoji_for_tag(guild, tag)
+    title = f"{clan} {emj + ' ' if emj else ''}`{tag}`  — Spots: {spots}"
     if reserved:
         title += f" | Reserved: {reserved}"
 
@@ -191,10 +200,10 @@ def make_embed_for_row_classic(row, filters_text: str) -> discord.Embed:
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
-def make_embed_for_row_search(row, filters_text: str) -> discord.Embed:
+def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     """
     Structured output for !clansearch (no column letters shown; skip empty lines).
-    First line: (B) | (C) | Level (D) | Spots (E)
+    First line: (B) | (C) | Level (D) | Spots (E) with emoji next to tag if found.
     """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
@@ -209,7 +218,8 @@ def make_embed_for_row_search(row, filters_text: str) -> discord.Embed:
     aa = (row[IDX_AA] or "").strip()   # non PR
     ab = (row[IDX_AB] or "").strip()   # PR
 
-    title = f"{b} | {c} | **Level** {d} | **Spots:** {e}"
+    emj = emoji_for_tag(guild, c)
+    title = f"{b} {emj + ' ' if emj else ''}| {c} | **Level** {d} | **Spots:** {e}"
 
     lines = ["**Entry Criteria:**"]
     if z:
@@ -230,7 +240,6 @@ def make_embed_for_row_search(row, filters_text: str) -> discord.Embed:
         if ab: cvc_bits.append(f"PR minimum: {ab}")
         lines.append("CvC: " + " | ".join(cvc_bits))
 
-    # If everything was empty, show a single dash after the header
     if len(lines) == 1:
         lines.append("—")
 
@@ -430,7 +439,7 @@ class ClanMatchView(discord.ui.View):
 
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
-            embeds = [builder(r, filters_text) for r in chunk]
+            embeds = [builder(r, filters_text, itx.guild) for r in chunk]
             await itx.followup.send(embeds=embeds)
 
 # ------------------- Commands -------------------
