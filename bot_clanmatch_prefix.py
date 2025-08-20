@@ -1,6 +1,6 @@
 # bot_clanmatch_prefix.py
 
-import os, json, time, asyncio
+import os, json, time, asyncio, re
 import discord
 from discord.ext import commands
 from collections import defaultdict
@@ -56,6 +56,11 @@ def playstyle_ok(cell_text: str, value: str | None) -> bool:
         return True
     return norm(value) in norm(cell_text)
 
+def parse_spots_num(cell_text: str) -> int:
+    """Extract first integer from the 'Spots' cell (E). Non-numeric => 0."""
+    m = re.search(r"\d+", cell_text or "")
+    return int(m.group()) if m else 0
+
 def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
     if len(row) <= IDX_AB or not row[COL_B_CLAN].strip():
         return False
@@ -83,7 +88,7 @@ def build_entry_criteria(row) -> str:
     if ab: parts.append(f"PR CvC: {ab}")
     return "**Entry Criteria:** " + (" | ".join(parts) if parts else "—")
 
-def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle) -> str:
+def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) -> str:
     parts = []
     if cb: parts.append(f"CB: {cb}")
     if hydra: parts.append(f"Hydra: {hydra}")
@@ -91,7 +96,8 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle) -> str:
     if cvc is not None:   parts.append(f"CvC: {'Yes' if cvc == '1' else 'No'}")
     if siege is not None: parts.append(f"Siege: {'Yes' if siege == '1' else 'No'}")
     if playstyle: parts.append(f"Playstyle: {playstyle}")
-    return " • ".join(parts) if parts else "—"
+    parts.append(f"Hide full: {'On' if hide_full else 'Off'}")
+    return " • ".join(parts)
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
     clan  = row[COL_B_CLAN].strip()
@@ -119,14 +125,15 @@ CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
-    """5 rows total: 4 selects + 1 row with 4 buttons (CvC, Siege, Reset, Search)."""
+    """5 rows total: four selects + one row with five buttons (CvC, Siege, Hide full, Reset, Search)."""
     def __init__(self, author_id: int):
         super().__init__(timeout=600)
         self.author_id = author_id
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None  # "1"/"0"/None
+        self.hide_full = False              # filter out 0-spot clans
 
-    # --- visual sync so selects keep showing chosen values after any button click ---
+    # --- visual sync so selects and toggles reflect current state ---
     def _sync_visuals(self):
         for child in self.children:
             if isinstance(child, discord.ui.Select):
@@ -134,184 +141,4 @@ class ClanMatchView(discord.ui.View):
                 ph = child.placeholder or ""
                 if "CB Difficulty" in ph: chosen = self.cb
                 elif "Hydra Difficulty" in ph: chosen = self.hydra
-                elif "Chimera Difficulty" in ph: chosen = self.chimera
-                elif "Playstyle" in ph: chosen = self.playstyle
-                for opt in child.options:
-                    opt.default = (chosen is not None and opt.value == chosen)
-            elif isinstance(child, discord.ui.Button):
-                if child.label.startswith("CvC:"):
-                    child.label = self._toggle_label("CvC", self.cvc)
-                    child.style = discord.ButtonStyle.success if self.cvc == "1" else (
-                        discord.ButtonStyle.danger if self.cvc == "0" else discord.ButtonStyle.secondary
-                    )
-                elif child.label.startswith("Siege:"):
-                    child.label = self._toggle_label("Siege", self.siege)
-                    child.style = discord.ButtonStyle.success if self.siege == "1" else (
-                        discord.ButtonStyle.danger if self.siege == "0" else discord.ButtonStyle.secondary
-                    )
-
-    async def interaction_check(self, itx: discord.Interaction) -> bool:
-        if itx.user.id != self.author_id:
-            await itx.response.send_message("This panel isn’t yours—run `!clanmatch` to get your own. 🙂", ephemeral=True)
-            return False
-        return True
-
-    # Row 0: CB
-    @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
-                       options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
-    async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.cb = select.values[0] if select.values else None
-        # no redraw needed; Discord shows the pick automatically
-        await itx.response.defer()
-
-    # Row 1: Hydra
-    @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
-                       options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
-    async def hydra_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.hydra = select.values[0] if select.values else None
-        await itx.response.defer()
-
-    # Row 2: Chimera
-    @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
-                       options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
-    async def chimera_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.chimera = select.values[0] if select.values else None
-        await itx.response.defer()
-
-    # Row 3: Playstyle
-    @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
-                       options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
-    async def playstyle_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.playstyle = select.values[0] if select.values else None
-        await itx.response.defer()
-
-    # helpers for toggles
-    def _cycle(self, current):  # None -> "1" -> "0" -> None
-        return "1" if current is None else ("0" if current == "1" else None)
-    def _toggle_label(self, name, value):
-        state = "—" if value is None else ("Yes" if value == "1" else "No")
-        return f"{name}: {state}"
-
-    # Row 4: Buttons (CvC toggle, Siege toggle, Reset, Search)
-    @discord.ui.button(label="CvC: —", style=discord.ButtonStyle.secondary, row=4)
-    async def toggle_cvc(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.cvc = self._cycle(self.cvc)
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
-        except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
-
-    @discord.ui.button(label="Siege: —", style=discord.ButtonStyle.secondary, row=4)
-    async def toggle_siege(self, itx: discord.Interaction, button: discord.ui.Button):
-        self.siege = self._cycle(self.siege)
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
-        except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
-
-    @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
-    async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        self.cb = self.hydra = self.chimera = self.playstyle = None
-        self.cvc = self.siege = None
-        self._sync_visuals()
-        try:
-            await itx.response.edit_message(view=self)
-        except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, view=self)
-
-    @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
-    async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle]):
-            await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
-            return
-
-        await itx.response.defer(thinking=True)  # PUBLIC results
-        try:
-            rows = ws.get_all_values()
-        except Exception as e:
-            await itx.followup.send(f"❌ Failed to read sheet: {e}")
-            return
-
-        data_rows = rows[1:]
-        matches = []
-        for row in data_rows:
-            try:
-                if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
-                    matches.append(row)
-            except Exception:
-                continue
-
-        if not matches:
-            await itx.followup.send("No matching clans found. Try a different combo.")
-            return
-
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle)
-        for i in range(0, len(matches), 10):
-            chunk = matches[i:i+10]
-            embeds = [make_embed_for_row(r, filters_text) for r in chunk]
-            await itx.followup.send(embeds=embeds)  # PUBLIC
-
-
-# ---------- Commands ----------
-@commands.cooldown(1, 2, commands.BucketType.user)
-@bot.command(name="clanmatch")
-async def clanmatch_cmd(ctx: commands.Context):
-    now = time.time()
-    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
-        return
-    LAST_CALL[ctx.author.id] = now
-
-    old_id = ACTIVE_PANELS.pop(ctx.author.id, None)
-    if old_id:
-        try:
-            old_msg = await ctx.channel.fetch_message(old_id)
-            await old_msg.delete()
-        except Exception:
-            pass
-
-    view = ClanMatchView(author_id=ctx.author.id)
-    # initial sync so defaults render as unselected
-    view._sync_visuals()
-    embed = discord.Embed(
-        title="Find a C1C Clan",
-        description="Pick any filters (you can leave some blank) and click **Search Clans**."
-    )
-    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
-    ACTIVE_PANELS[ctx.author.id] = sent.id
-
-@clanmatch_cmd.error
-async def clanmatch_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        return
-
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("✅ I’m alive and listening, captain!")
-
-# ---------- Tiny web server so Render sees a port ----------
-async def _health(_req):
-    return web.Response(text="ok")
-
-async def start_webserver():
-    app = web.Application()
-    app.router.add_get("/", _health)
-    app.router.add_get("/health", _health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", "10000"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"[keepalive] HTTP server listening on :{port}")
-
-# ---------- Run both web server and bot ----------
-async def main():
-    asyncio.create_task(start_webserver())
-    token = os.environ.get("DISCORD_TOKEN", "").strip()
-    if not token or len(token) < 50:
-        raise RuntimeError("Missing/short DISCORD_TOKEN.")
-    await bot.start(token)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                elif "Chimera Difficulty" in ph: chosen = se
