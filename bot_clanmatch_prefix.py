@@ -54,7 +54,7 @@ def get_rows(force=False):
     """Return all rows with simple 60s cache."""
     global _cache_rows, _cache_time
     if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
-        ws = get_ws(force=False)
+        ws = get_ws(False)
         _cache_rows = ws.get_all_values()
         _cache_time = time.time()
     return _cache_rows
@@ -66,7 +66,7 @@ def clear_cache():
     _ws = None  # reconnect next time
 
 # ------------------- Column map (0-based) -------------------
-COL_B_CLAN, COL_C_TAG, COL_E_SPOTS = 1, 2, 4
+COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 1, 2, 3, 4
 # Filters P–U
 COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
 # Entry Criteria V–AB
@@ -130,12 +130,11 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
     )
 
 # ------------------- Formatting -------------------
-def build_entry_criteria(row) -> str:
+def build_entry_criteria_classic(row) -> str:
     """
-    V/W labeled (not bold); X/Y/Z verbatim; AA/AB labeled (not bold).
-    Wider spacing between items via NBSP around the pipe.
+    For !clanmatch output: inner labels not bold; item spacing via NBSP pipes.
     """
-    NBSP_PIPE = "\u00A0|\u00A0"  # non-breaking spaces around the pipe
+    NBSP_PIPE = "\u00A0|\u00A0"
     parts = []
 
     v  = (row[IDX_V]  or "").strip()   # Hydra keys
@@ -169,21 +168,20 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
 
-def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    """Header shows Reserved (AC) when present; body adds AE and AD lines with blank-line spacing."""
+def make_embed_for_row_classic(row, filters_text: str) -> discord.Embed:
+    """Classic output (used by !clanmatch)."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
-    reserved = (row[IDX_AC_RESERVED] or "").strip()        # AC
-    comments = (row[IDX_AD_COMMENTS] or "").strip()        # AD
-    addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()    # AE
+    reserved = (row[IDX_AC_RESERVED] or "").strip()
+    comments = (row[IDX_AD_COMMENTS] or "").strip()
+    addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
     title = f"{clan}  `{tag}`  — Spots: {spots}"
     if reserved:
         title += f" | Reserved: {reserved}"
 
-    # Blank line between sections
-    sections = [build_entry_criteria(row)]
+    sections = [build_entry_criteria_classic(row)]
     if addl_req:
         sections.append(f"**Additional Requirements:** {addl_req}")
     if comments:
@@ -192,6 +190,41 @@ def make_embed_for_row(row, filters_text: str) -> discord.Embed:
     e = discord.Embed(title=title, description="\n\n".join(sections))
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
+
+def make_embed_for_row_search(row, filters_text: str) -> discord.Embed:
+    """
+    Structured output for !clansearch.
+    First line: (B value) | (C value) | Level (D) | Spots (E)
+    Then an 'Entry Criteria' block mapping Z, V/X, W/Y, AA/AB.
+    """
+    b = (row[COL_B_CLAN] or "").strip()
+    c = (row[COL_C_TAG]  or "").strip()
+    d = (row[COL_D_LEVEL] or "").strip()
+    e = (row[COL_E_SPOTS] or "").strip()
+
+    v  = (row[IDX_V]  or "").strip()
+    w  = (row[IDX_W]  or "").strip()
+    x  = (row[IDX_X]  or "").strip()
+    y  = (row[IDX_Y]  or "").strip()
+    z  = (row[IDX_Z]  or "").strip()
+    aa = (row[IDX_AA] or "").strip()
+    ab = (row[IDX_AB] or "").strip()
+
+    title = f"{b} | {c} | **Level** {d} | **Spots:** {e}"
+
+    lines = [
+        "**Entry Criteria:**",
+        f"Clan Boss (Z): {z or '—'}",
+        f"Hydra (V keys – X): {(v or '—')} keys — {(x or '—')}",
+        f"Chimera (W keys – Y): {(w or '—')} keys — {(y or '—')}",
+        f"CvC: non PR (AA) minimum: {(aa or '—')} | PR (AB) minimum: {(ab or '—')}",
+        "",
+        "*Letters in brackets indicate the source columns.*"
+    ]
+
+    ebd = discord.Embed(title=title, description="\n".join(lines))
+    ebd.set_footer(text=f"Filters used: {filters_text}")
+    return ebd
 
 # ------------------- Discord bot -------------------
 intents = discord.Intents.default()
@@ -209,9 +242,10 @@ PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Roster, Reset, Search)."""
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, embed_variant: str = "classic"):
         super().__init__(timeout=1800)  # 30 min
         self.author_id = author_id
+        self.embed_variant = embed_variant  # "classic" or "search"
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
         self.roster_mode: str | None = None   # None = All, 'open' = Spots > 0, 'full' = Spots <= 0
@@ -225,7 +259,7 @@ class ClanMatchView(discord.ui.View):
             if self.message:
                 expired = discord.Embed(
                     title="Find a C1C Clan",
-                    description="⏳ Panel expired. Run `!clanmatch` to open a fresh one."
+                    description="⏳ Panel expired. Run `!clanmatch` or `!clansearch` to open a fresh one."
                 )
                 await self.message.edit(embed=expired, view=self)
         except Exception as e:
@@ -267,7 +301,7 @@ class ClanMatchView(discord.ui.View):
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
-            await itx.response.send_message("This panel isn’t yours—run `!clanmatch` to get your own. 🙂", ephemeral=True)
+            await itx.response.send_message("This panel isn’t yours—run `!clanmatch` or `!clansearch` to get your own. 🙂", ephemeral=True)
             return False
         return True
 
@@ -353,7 +387,7 @@ class ClanMatchView(discord.ui.View):
 
         await itx.response.defer(thinking=True)  # public results
         try:
-            rows = get_rows(force=False)
+            rows = get_rows(False)
         except Exception as e:
             await itx.followup.send(f"❌ Failed to read sheet: {e}")
             return
@@ -380,9 +414,14 @@ class ClanMatchView(discord.ui.View):
         filters_text = format_filters_footer(
             self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
         )
+        if self.embed_variant == "search":
+            builder = make_embed_for_row_search
+        else:
+            builder = make_embed_for_row_classic
+
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
-            embeds = [make_embed_for_row(r, filters_text) for r in chunk]
+            embeds = [builder(r, filters_text) for r in chunk]
             await itx.followup.send(embeds=embeds)
 
 # ------------------- Commands -------------------
@@ -394,7 +433,7 @@ async def clanmatch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-    view = ClanMatchView(author_id=ctx.author.id)
+    view = ClanMatchView(author_id=ctx.author.id, embed_variant="classic")
     view._sync_visuals()
 
     embed = discord.Embed(
@@ -406,7 +445,40 @@ async def clanmatch_cmd(ctx: commands.Context):
         )
     )
 
-    # Try to edit your previous panel in place; if not found, send a new one
+    old_id = ACTIVE_PANELS.get(ctx.author.id)
+    if old_id:
+        try:
+            msg = await ctx.channel.fetch_message(old_id)
+            view.message = msg
+            await msg.edit(embed=embed, view=view)
+            return
+        except Exception:
+            pass
+
+    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
+    view.message = sent
+    ACTIVE_PANELS[ctx.author.id] = sent.id
+
+@commands.cooldown(1, 2, commands.BucketType.user)
+@bot.command(name="clansearch")
+async def clansearch_cmd(ctx: commands.Context):
+    """Same panel, different panel text + result format."""
+    now = time.time()
+    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
+        return
+    LAST_CALL[ctx.author.id] = now
+
+    view = ClanMatchView(author_id=ctx.author.id, embed_variant="search")
+    view._sync_visuals()
+
+    embed = discord.Embed(
+        title="Search for a C1C Clan",
+        description=(
+            "Pick any filters *(you can leave some blank)* and click **Search Clans** "
+            "to see Entry Criteria and open Spots."
+        )
+    )
+
     old_id = ACTIVE_PANELS.get(ctx.author.id)
     if old_id:
         try:
@@ -426,6 +498,7 @@ async def clanmatch_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         return
 
+# Simple ping
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
@@ -433,18 +506,16 @@ async def ping(ctx):
 # Health (prefix)
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
-    """Lightweight health check with hard fail-safes."""
     try:
         try:
-            ws = get_ws(force=False)
-            _ = ws.row_values(1)  # tiny read
+            ws = get_ws(False)
+            _ = ws.row_values(1)
             sheets_status = f"OK (`{WORKSHEET_NAME}`)"
         except Exception as e:
             sheets_status = f"ERROR: {type(e).__name__}"
-
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
-        msg = f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}"
-        await ctx.reply(msg, mention_author=False)
+        await ctx.reply(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}",
+                        mention_author=False)
     except Exception as e:
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
@@ -459,7 +530,7 @@ async def reload_cache(ctx):
 async def health_slash(itx: discord.Interaction):
     await itx.response.defer(thinking=False, ephemeral=False)
     try:
-        ws = get_ws(force=False)
+        ws = get_ws(False)
         _ = ws.row_values(1)
         sheets_status = f"OK (`{WORKSHEET_NAME}`)"
     except Exception as e:
@@ -471,7 +542,6 @@ async def health_slash(itx: discord.Interaction):
 @bot.event
 async def on_ready():
     print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
-    # sync slash commands (so /health shows up)
     try:
         synced = await bot.tree.sync()
         print(f"[slash] synced {len(synced)} commands", flush=True)
