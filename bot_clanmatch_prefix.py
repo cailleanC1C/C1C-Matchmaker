@@ -219,7 +219,7 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
     # Use padded proxy if possible; fallback to raw emoji URL
-    thumb = padded_emoji_url(guild, tag, size=128, box=0.72)
+    thumb = padded_emoji_url(guild, tag, size=256, box=0.90)
     if not thumb:
         em = emoji_for_tag(guild, tag)
         if em:
@@ -741,3 +741,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
