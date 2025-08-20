@@ -363,18 +363,24 @@ async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
 # Health (prefix)
-@bot.command(name="health")
-async def health_prefix(ctx):
-    await ctx.trigger_typing()
-    # try a very light sheets check
+@bot.command(name="health", aliases=["status"])
+async def health_prefix(ctx: commands.Context):
+    """Lightweight health check with hard fail-safes."""
     try:
-        ws = get_ws(force=False)
-        _ = ws.row_values(1)
-        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+        # very light Sheets poke
+        try:
+            ws = get_ws(force=False)
+            _ = ws.row_values(1)  # tiny read
+            sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+        except Exception as e:
+            sheets_status = f"ERROR: {type(e).__name__}"
+
+        latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
+        msg = f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}"
+        await ctx.reply(msg, mention_author=False)
     except Exception as e:
-        sheets_status = f"ERROR: {e.__class__.__name__}"
-    latency_ms = int(bot.latency * 1000) if bot.latency else -1
-    await ctx.send(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}")
+        # last-ditch: tell us what blew up instead of failing silently
+        await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
 # Reload cache
 @bot.command(name="reload")
@@ -436,5 +442,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
