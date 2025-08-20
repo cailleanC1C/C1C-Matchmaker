@@ -193,34 +193,46 @@ def make_embed_for_row_classic(row, filters_text: str) -> discord.Embed:
 
 def make_embed_for_row_search(row, filters_text: str) -> discord.Embed:
     """
-    Structured output for !clansearch.
-    First line: (B value) | (C value) | Level (D) | Spots (E)
-    Then an 'Entry Criteria' block mapping Z, V/X, W/Y, AA/AB.
+    Structured output for !clansearch (no column letters shown; skip empty lines).
+    First line: (B) | (C) | Level (D) | Spots (E)
     """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
     d = (row[COL_D_LEVEL] or "").strip()
     e = (row[COL_E_SPOTS] or "").strip()
 
-    v  = (row[IDX_V]  or "").strip()
-    w  = (row[IDX_W]  or "").strip()
-    x  = (row[IDX_X]  or "").strip()
-    y  = (row[IDX_Y]  or "").strip()
-    z  = (row[IDX_Z]  or "").strip()
-    aa = (row[IDX_AA] or "").strip()
-    ab = (row[IDX_AB] or "").strip()
+    v  = (row[IDX_V]  or "").strip()   # Hydra keys
+    w  = (row[IDX_W]  or "").strip()   # Chimera keys
+    x  = (row[IDX_X]  or "").strip()   # Hydra descriptor
+    y  = (row[IDX_Y]  or "").strip()   # Chimera descriptor
+    z  = (row[IDX_Z]  or "").strip()   # Clan Boss / CB Damage
+    aa = (row[IDX_AA] or "").strip()   # non PR
+    ab = (row[IDX_AB] or "").strip()   # PR
 
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e}"
 
-    lines = [
-        "**Entry Criteria:**",
-        f"Clan Boss (Z): {z or '—'}",
-        f"Hydra (V keys – X): {(v or '—')} keys — {(x or '—')}",
-        f"Chimera (W keys – Y): {(w or '—')} keys — {(y or '—')}",
-        f"CvC: non PR (AA) minimum: {(aa or '—')} | PR (AB) minimum: {(ab or '—')}",
-        "",
-        "*Letters in brackets indicate the source columns.*"
-    ]
+    lines = ["**Entry Criteria:**"]
+    if z:
+        lines.append(f"Clan Boss: {z}")
+    if v or x:
+        hx_parts = []
+        if v: hx_parts.append(f"{v} keys")
+        if x: hx_parts.append(x)
+        lines.append("Hydra: " + " — ".join(hx_parts))
+    if w or y:
+        cy_parts = []
+        if w: cy_parts.append(f"{w} keys")
+        if y: cy_parts.append(y)
+        lines.append("Chimera: " + " — ".join(cy_parts))
+    if aa or ab:
+        cvc_bits = []
+        if aa: cvc_bits.append(f"non PR minimum: {aa}")
+        if ab: cvc_bits.append(f"PR minimum: {ab}")
+        lines.append("CvC: " + " | ".join(cvc_bits))
+
+    # If everything was empty, show a single dash after the header
+    if len(lines) == 1:
+        lines.append("—")
 
     ebd = discord.Embed(title=title, description="\n".join(lines))
     ebd.set_footer(text=f"Filters used: {filters_text}")
@@ -414,10 +426,7 @@ class ClanMatchView(discord.ui.View):
         filters_text = format_filters_footer(
             self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
         )
-        if self.embed_variant == "search":
-            builder = make_embed_for_row_search
-        else:
-            builder = make_embed_for_row_classic
+        builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
