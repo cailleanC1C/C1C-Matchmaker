@@ -6,7 +6,6 @@ from discord.ext import commands
 from discord import app_commands, InteractionResponded
 from collections import defaultdict
 import gspread
-from google.oauth2.google_auth_oauthlib import flow  # not used, but avoid accidental import errors
 from google.oauth2.service_account import Credentials
 from aiohttp import web
 
@@ -55,7 +54,7 @@ def get_rows(force=False):
     """Return all rows with simple 60s cache."""
     global _cache_rows, _cache_time
     if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
-        ws = get_ws(force=False)
+        ws = get_ws(False)
         _cache_rows = ws.get_all_values()
         _cache_time = time.time()
     return _cache_rows
@@ -121,7 +120,7 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 def build_entry_criteria(row) -> str:
     """
     V/W labeled (bold); X/Y/Z verbatim; AA/AB labeled (bold).
-    Add spacing between items via NBSP around the pipe.
+    Wider spacing between items via NBSP around the pipe.
     """
     NBSP_PIPE = "\u00A0|\u00A0"  # non-breaking space on both sides of |
     parts = []
@@ -156,7 +155,7 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) 
     return " • ".join(parts)
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    """Header shows Reserved (AC) when present; body adds AE and AD lines with bold labels."""
+    """Header shows Reserved (AC) when present; body adds AE and AD with bold labels."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
@@ -202,7 +201,6 @@ class ClanMatchView(discord.ui.View):
         self.hide_full = False
         self.message: discord.Message | None = None  # set after sending
 
-    # on-timeout: disable + mark expired
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
@@ -216,7 +214,6 @@ class ClanMatchView(discord.ui.View):
         except Exception as e:
             print("[view timeout] failed to edit:", e)
 
-    # visual sync so selects and toggles reflect current state
     def _sync_visuals(self):
         for child in self.children:
             if isinstance(child, discord.ui.Select):
@@ -249,7 +246,6 @@ class ClanMatchView(discord.ui.View):
             return False
         return True
 
-    # Row 0–3: selects
     @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
                        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
@@ -274,7 +270,6 @@ class ClanMatchView(discord.ui.View):
         self.playstyle = select.values[0] if select.values else None
         await itx.response.defer()
 
-    # Row 4: buttons
     def _cycle(self, current):
         return "1" if current is None else ("0" if current == "1" else None)
     def _toggle_label(self, name, value):
@@ -320,7 +315,7 @@ class ClanMatchView(discord.ui.View):
 
         await itx.response.defer(thinking=True)  # public results
         try:
-            rows = get_rows(force=False)
+            rows = get_rows(False)
         except Exception as e:
             await itx.followup.send(f"❌ Failed to read sheet: {e}")
             return
@@ -366,7 +361,6 @@ async def clanmatch_cmd(ctx: commands.Context):
         )
     )
 
-    # Try to edit your previous panel in place; if not found, send a new one
     old_id = ACTIVE_PANELS.get(ctx.author.id)
     if old_id:
         try:
@@ -390,37 +384,31 @@ async def clanmatch_error(ctx, error):
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
-# Health (prefix)
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
-    """Lightweight health check with hard fail-safes."""
     try:
-        # very light Sheets poke
         try:
-            ws = get_ws(force=False)
-            _ = ws.row_values(1)  # tiny read
+            ws = get_ws(False)
+            _ = ws.row_values(1)
             sheets_status = f"OK (`{WORKSHEET_NAME}`)"
         except Exception as e:
             sheets_status = f"ERROR: {type(e).__name__}"
-
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
         msg = f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}"
         await ctx.reply(msg, mention_author=False)
     except Exception as e:
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
-# Reload cache
 @bot.command(name="reload")
 async def reload_cache(ctx):
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
 
-# Health (slash)
 @bot.tree.command(name="health", description="Bot & Sheets status")
 async def health_slash(itx: discord.Interaction):
     await itx.response.defer(thinking=False, ephemeral=False)
     try:
-        ws = get_ws(force=False)
+        ws = get_ws(False)
         _ = ws.row_values(1)
         sheets_status = f"OK (`{WORKSHEET_NAME}`)"
     except Exception as e:
@@ -432,7 +420,6 @@ async def health_slash(itx: discord.Interaction):
 @bot.event
 async def on_ready():
     print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
-    # sync slash commands (so /health shows up)
     try:
         synced = await bot.tree.sync()
         print(f"[slash] synced {len(synced)} commands", flush=True)
