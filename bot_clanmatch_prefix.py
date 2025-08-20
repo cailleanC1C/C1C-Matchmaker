@@ -326,10 +326,14 @@ async def clanmatch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-    view = ClanMatchView(author_id=ctx.author.id)
-    view._sync_visuals()
-    embed = discord.Embed(title="Find a C1C Clan for your recruit", description="Pick any filters (you can leave some blank) and click **Search Clans**.
-**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. Too many filters might narrow things down to zero")
+embed = discord.Embed(
+    title="Find a C1C Clan for your recruit",
+    description=(
+        "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
+        "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
+        "Too many filters might narrow things down to zero."
+    )
+)
 
     # edit-in-place if a panel exists
     old_id = ACTIVE_PANELS.get(ctx.author.id)
@@ -429,3 +433,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
