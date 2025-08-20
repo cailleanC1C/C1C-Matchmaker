@@ -153,21 +153,22 @@ def emoji_for_tag(guild: discord.Guild | None, tag: str | None):
 # ----- padded emoji URL helper (proxy only) -----
 def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | None = None, box: float | None = None) -> str | None:
     """
-    Build a URL to our /emoji-pad proxy that fetches the discord emoji, pads it into a square
-    with consistent transparent margins, and returns a PNG. If BASE_URL missing or no emoji, None.
+    Build a URL to our /emoji-pad proxy that fetches the discord emoji, trims transparent
+    borders, pads into a square with consistent margins, and returns a PNG.
     """
     if not guild or not tag:
         return None
     emj = emoji_for_tag(guild, tag)
     if not emj:
         return None
-    src = str(emj.url)
+    src  = str(emj.url)
     base = BASE_URL
     if not base:
         return None
     size = size or EMOJI_PAD_SIZE
     box  = box  or EMOJI_PAD_BOX
-    q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box)})
+    # cache-buster so CDN changes propagate (emoji asset id)
+    q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box), "v": str(emj.id)})
     return f"{base.rstrip('/')}/emoji-pad?{q}"
 
 # ------------------- Formatting -------------------
@@ -204,7 +205,6 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     return " • ".join(parts)
 
 def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
-    """Classic output (used by !clanmatch)."""
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
@@ -236,10 +236,6 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     return e
 
 def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
-    """
-    Structured output for !clansearch (skip empty criteria lines).
-    First line: Clan | TAG | Level D | Spots E (right-side padded thumbnail).
-    """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
     d = (row[COL_D_LEVEL] or "").strip()
@@ -693,9 +689,8 @@ async def _health_http(_req): return web.Response(text="ok")
 
 async def emoji_pad_handler(request: web.Request):
     """
-    /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>
-    Downloads the emoji, scales it so its longest edge fits into (s*box),
-    centers onto an s×s transparent canvas, returns PNG.
+    /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>&v=<cache-buster>
+    Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
     """
     src = request.query.get("u")
     size = int(request.query.get("s", str(EMOJI_PAD_SIZE)))
@@ -707,18 +702,29 @@ async def emoji_pad_handler(request: web.Request):
             if resp.status != 200:
                 return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
             raw = await resp.read()
+
         img = Image.open(io.BytesIO(raw)).convert("RGBA")
+
+        # --- NEW: Trim transparent borders so glyph is truly centered ---
+        alpha = img.split()[-1]
+        bbox = alpha.getbbox()  # minimal non-transparent bounding box
+        if bbox:
+            img = img.crop(bbox)
+
+        # Scale glyph to fit target “box” inside the square canvas
         w, h = img.size
         max_side = max(w, h)
-        target = max(1, int(size * box))
-        scale = target / float(max_side)
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
+        target   = max(1, int(size * box))
+        scale    = target / float(max_side)
+        new_w    = max(1, int(w * scale))
+        new_h    = max(1, int(h * scale))
         img = img.resize((new_w, new_h), Image.LANCZOS)
+
         canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         x = (size - new_w) // 2
         y = (size - new_h) // 2
         canvas.paste(img, (x, y), img)
+
         out = io.BytesIO()
         canvas.save(out, format="PNG")
         return web.Response(
