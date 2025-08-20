@@ -1,6 +1,7 @@
 # bot_clanmatch_prefix.py
 
-import os, json, time, asyncio, re, traceback
+import os, json, time, asyncio, re, traceback, urllib.parse
+import io
 import discord
 from discord.ext import commands
 from discord import InteractionResponded
@@ -8,7 +9,8 @@ from discord.utils import get
 from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
-from aiohttp import web
+from aiohttp import web, ClientSession
+from PIL import Image  # Pillow
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
@@ -19,11 +21,15 @@ SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
+# public base URL to serve padded images from (Render usually sets RENDER_EXTERNAL_URL)
+BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
 if not CREDS_JSON:
     print("[boot] GSPREAD_CREDENTIALS missing", flush=True)
 if not SHEET_ID:
     print("[boot] GOOGLE_SHEET_ID missing", flush=True)
 print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
+print(f"[boot] BASE_URL={BASE_URL}", flush=True)
 
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
@@ -67,7 +73,11 @@ def clear_cache():
     _ws = None  # reconnect next time
 
 # ------------------- Column map (0-based) -------------------
-COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 1, 2, 3, 4
+COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
+COL_F_PROGRESSION, COL_G_LEAD, COL_H_DEPUTIES = 5, 6, 7
+COL_I_CVC_TIER, COL_J_CVC_WINS, COL_K_SIEGE_TIER, COL_L_SIEGE_WINS = 8, 9, 10, 11
+# M/N/O = 12,13,14
+COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14
 # Filters P–U
 COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
 # Entry Criteria V–AB
@@ -130,29 +140,42 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
-def emoji_for_tag(guild: discord.Guild | None, tag: str | None) -> tuple[str, str | None]:
+def emoji_for_tag(guild: discord.Guild | None, tag: str | None):
+    """Return the Discord emoji object for tag (or None)."""
+    if not guild or not tag:
+        return None
+    return get(guild.emojis, name=tag.strip())
+
+# ----- NEW: padded emoji URL helper -----
+def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int = 128, box: float = 0.72) -> str | None:
     """
-    Return (mention, image_url) for the emoji whose name == tag.
-    mention -> '<:name:id>' or '<a:name:id>', or '' if not found.
-    image_url -> CDN URL for thumbnail usage, or None.
+    Build a URL to our /emoji-pad proxy that fetches the discord emoji, pads it into a square
+    with consistent transparent margins, and returns a PNG. If BASE_URL missing or no emoji, None.
     """
     if not guild or not tag:
-        return "", None
-    e = get(guild.emojis, name=tag.strip())
-    return (str(e), (str(e.url) if e else None)) if e else ("", None)
+        return None
+    emj = emoji_for_tag(guild, tag)
+    if not emj:
+        return None
+    src = str(emj.url)
+    base = BASE_URL
+    if not base:
+        return None
+    q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box)})
+    return f"{base.rstrip('/')}/emoji-pad?{q}"
 
 # ------------------- Formatting -------------------
 def build_entry_criteria_classic(row) -> str:
     """For !clanmatch output: inner labels not bold; spacing via NBSP pipes."""
     NBSP_PIPE = "\u00A0|\u00A0"
     parts = []
-    v  = (row[IDX_V]  or "").strip()   # Hydra keys
-    w  = (row[IDX_W]  or "").strip()   # Chimera keys
-    x  = (row[IDX_X]  or "").strip()   # Hydra Clash
-    y  = (row[IDX_Y]  or "").strip()   # Chimera Clash
-    z  = (row[IDX_Z]  or "").strip()   # CB Damage / text
-    aa = (row[IDX_AA] or "").strip()   # non PR CvC
-    ab = (row[IDX_AB] or "").strip()   # PR CvC
+    v  = (row[IDX_V]  or "").strip()
+    w  = (row[IDX_W]  or "").strip()
+    x  = (row[IDX_X]  or "").strip()
+    y  = (row[IDX_Y]  or "").strip()
+    z  = (row[IDX_Z]  or "").strip()
+    aa = (row[IDX_AA] or "").strip()
+    ab = (row[IDX_AB] or "").strip()
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -183,8 +206,6 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
-    # no inline emoji in title anymore; thumbnail only
-    _, url = emoji_for_tag(guild, tag)
     title = f"{clan} `{tag}`  — Spots: {spots}"
     if reserved:
         title += f" | Reserved: {reserved}"
@@ -196,15 +217,23 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
         sections.append(f"**Clan Needs/Comments:** {comments}")
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
-    if url:
-        e.set_thumbnail(url=url)  # bigger emoji at the side
+
+    # Use padded proxy if possible; fallback to raw emoji URL
+    thumb = padded_emoji_url(guild, tag, size=128, box=0.72)
+    if not thumb:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            thumb = str(em.url)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
 def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     """
     Structured output for !clansearch (skip empty criteria lines).
-    First line: Clan | TAG | Level D | Spots E (no inline emoji, use thumbnail).
+    First line: Clan | TAG | Level D | Spots E (right-side padded thumbnail).
     """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
@@ -219,7 +248,6 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     aa = (row[IDX_AA] or "").strip()
     ab = (row[IDX_AB] or "").strip()
 
-    _, url = emoji_for_tag(guild, c)
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
 
     lines = ["**Entry Criteria:**"]
@@ -244,8 +272,15 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
         lines.append("—")
 
     e = discord.Embed(title=title, description="\n".join(lines))
-    if url:
-        e.set_thumbnail(url=url)
+
+    thumb = padded_emoji_url(guild, c, size=128, box=0.72)
+    if not thumb:
+        em = emoji_for_tag(guild, c)
+        if em:
+            thumb = str(em.url)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
@@ -255,7 +290,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
-# key by (user_id, variant) so clanmatch & clansearch have independent panels
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}
 COOLDOWN_SEC = 2.0
 
@@ -399,11 +433,7 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        # Require at least one filter (including roster mode)
-        if not any([
-            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle,
-            self.roster_mode is not None
-        ]):
+        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
             return
 
@@ -433,9 +463,7 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send("No matching clans found. Try a different combo.")
             return
 
-        filters_text = format_filters_footer(
-            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
-        )
+        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
         builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
         for i in range(0, len(matches), 10):
@@ -443,11 +471,10 @@ class ClanMatchView(discord.ui.View):
             embeds = [builder(r, filters_text, itx.guild) for r in chunk]
             await itx.followup.send(embeds=embeds)
 
-# ------------------- Commands -------------------
+# ------------------- Commands: panels -------------------
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
-    """Detailed panel with tips."""
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -483,7 +510,6 @@ async def clanmatch_cmd(ctx: commands.Context):
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context):
-    """Concise panel for search."""
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -494,10 +520,7 @@ async def clansearch_cmd(ctx: commands.Context):
 
     embed = discord.Embed(
         title="Search for a C1C Clan",
-        description=(
-            "Pick any filters *(you can leave some blank)* and click **Search Clans** "
-            "to see Entry Criteria and open Spots."
-        )
+        description="Pick any filters *(you can leave some blank)* and click **Search Clans** to see Entry Criteria and open Spots."
     )
 
     key = (ctx.author.id, "search")
@@ -515,17 +538,97 @@ async def clansearch_cmd(ctx: commands.Context):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
 
-@clanmatch_cmd.error
-async def clanmatch_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        return
+# ------------------- Clan profile command (optional, from earlier step) -------------------
+def find_clan_row(query: str):
+    if not query:
+        return None
+    q = query.strip().upper()
+    rows = get_rows(False)
+    exact_tag = None
+    exact_name = None
+    partials = []
+    for row in rows[1:]:
+        if is_header_row(row):
+            continue
+        name = (row[COL_B_CLAN] or "").strip()
+        tag  = (row[COL_C_TAG]  or "").strip()
+        if not name and not tag:
+            continue
+        nU, tU = name.upper(), tag.upper()
+        if q == tU:
+            exact_tag = row; break
+        if q == nU and exact_name is None:
+            exact_name = row
+        if q in tU or q in nU:
+            partials.append(row)
+    return exact_tag or exact_name or (partials[0] if partials else None)
 
-# Simple ping
+def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
+    rank  = (row[COL_A_RANK]        or "").strip()
+    name  = (row[COL_B_CLAN]        or "").strip()
+    tag   = (row[COL_C_TAG]         or "").strip()
+    lvl   = (row[COL_D_LEVEL]       or "").strip()
+    lead  = (row[COL_G_LEAD]        or "").strip()
+    deps  = (row[COL_H_DEPUTIES]    or "").strip()
+    cb    = (row[COL_M_CB]          or "").strip()
+    hydra = (row[COL_N_HYDRA]       or "").strip()
+    chim  = (row[COL_O_CHIMERA]     or "").strip()
+    cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
+    cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
+    sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
+    sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
+    prog  = (row[COL_F_PROGRESSION] or "").strip()
+    style = (row[COL_U_STYLE]       or "").strip()
+
+    title = f"{name} | {tag} | **Level** {lvl} | **Global Rank** {rank}"
+
+    lines = [
+        f"**Clan Lead:** {lead or '—'}",
+        f"**Clan Deputies:** {deps or '—'}",
+        "",
+        f"**Clan Boss:** {cb or '—'}",
+        f"**Hydra:** {hydra or '—'}",
+        f"**Chimera:** {chim or '—'}",
+        "",
+        f"**CvC**: Tier {cvc_t or '—'} | Wins {cvc_w or '—'}",
+        f"**Siege:** Tier {sg_t or '—'} | Wins {sg_w or '—'}",
+        "",
+    ]
+    tail = " | ".join([p for p in [prog, style] if p])
+    if tail: lines.append(tail)
+
+    e = discord.Embed(title=title, description="\n".join(lines))
+
+    thumb = padded_emoji_url(guild, tag, size=128, box=0.72)
+    if not thumb:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            thumb = str(em.url)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+
+    return e
+
+@bot.command(name="clanprofile", aliases=["clan", "cp"])
+async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
+    if not query:
+        await ctx.reply("Usage: `!clan <tag or name>` — e.g., `!clan C1CE` or `!clan Elders`", mention_author=False)
+        return
+    try:
+        row = find_clan_row(query)
+        if not row:
+            await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
+            return
+        embed = make_embed_for_profile(row, ctx.guild)
+        await ctx.reply(embed=embed, mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
+
+# ------------------- Health / reload -------------------
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
-# Health (prefix)
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
     try:
@@ -541,13 +644,11 @@ async def health_prefix(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
-# Reload cache
 @bot.command(name="reload")
-async def reload_cache(ctx):
+async def reload_cache_cmd(ctx):
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
 
-# Health (slash)
 @bot.tree.command(name="health", description="Bot & Sheets status")
 async def health_slash(itx: discord.Interaction):
     await itx.response.defer(thinking=False, ephemeral=False)
@@ -570,13 +671,53 @@ async def on_ready():
     except Exception as e:
         print(f"[slash] sync failed: {e}", flush=True)
 
-# ------------------- Tiny web server (Render port) -------------------
+# ------------------- Tiny web server + image-pad proxy -------------------
 async def _health_http(_req): return web.Response(text="ok")
+
+async def emoji_pad_handler(request: web.Request):
+    """
+    /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>
+    Downloads the emoji, scales it so its longest edge fits into (s*box),
+    centers onto an s×s transparent canvas, returns PNG.
+    """
+    src = request.query.get("u")
+    size = int(request.query.get("s", "128"))
+    box  = float(request.query.get("box", "0.72"))
+    if not src:
+        return web.Response(status=400, text="missing u")
+    try:
+        async with request.app["session"].get(src) as resp:
+            if resp.status != 200:
+                return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
+            raw = await resp.read()
+        img = Image.open(io.BytesIO(raw)).convert("RGBA")
+        w, h = img.size
+        max_side = max(w, h)
+        target = max(1, int(size * box))
+        scale = target / float(max_side)
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        x = (size - new_w) // 2
+        y = (size - new_h) // 2
+        canvas.paste(img, (x, y), img)
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return web.Response(
+            body=out.getvalue(),
+            headers={"Cache-Control": "public, max-age=86400"},
+            content_type="image/png",
+        )
+    except Exception as e:
+        return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
 async def start_webserver():
     app = web.Application()
+    app["session"] = ClientSession()
     app.router.add_get("/", _health_http)
     app.router.add_get("/health", _health_http)
+    app.router.add_get("/emoji-pad", emoji_pad_handler)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", "10000"))
