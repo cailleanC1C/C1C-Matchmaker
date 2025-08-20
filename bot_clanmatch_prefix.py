@@ -130,12 +130,16 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
-def emoji_for_tag(guild: discord.Guild | None, tag: str | None) -> str:
-    """Return the emoji mention for a clan tag if present in the guild, else empty string."""
+def emoji_for_tag(guild: discord.Guild | None, tag: str | None) -> tuple[str, str | None]:
+    """
+    Return (mention, image_url) for the emoji whose name == tag.
+    mention -> '<:name:id>' or '<a:name:id>', or '' if not found.
+    image_url -> CDN URL for thumbnail usage, or None.
+    """
     if not guild or not tag:
-        return ""
+        return "", None
     e = get(guild.emojis, name=tag.strip())
-    return str(e) if e else ""
+    return (str(e), (str(e.url) if e else None)) if e else ("", None)
 
 # ------------------- Formatting -------------------
 def build_entry_criteria_classic(row) -> str:
@@ -185,8 +189,8 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
-    emj   = emoji_for_tag(guild, tag)
-    title = f"{clan} {emj + ' ' if emj else ''}`{tag}`  — Spots: {spots}"
+    mention, url = emoji_for_tag(guild, tag)
+    title = f"{clan} {mention + ' ' if mention else ''}`{tag}`  — Spots: {spots}"
     if reserved:
         title += f" | Reserved: {reserved}"
 
@@ -197,13 +201,15 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
         sections.append(f"**Clan Needs/Comments:** {comments}")
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
+    if url:
+        e.set_thumbnail(url=url)  # bigger emoji
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
 def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     """
     Structured output for !clansearch (no column letters shown; skip empty lines).
-    First line: (B) | (C) | Level (D) | Spots (E) with emoji next to tag if found.
+    First line: (B) | (C) | Level (D) | Spots (E) + emoji mention + thumbnail.
     """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
@@ -218,8 +224,8 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     aa = (row[IDX_AA] or "").strip()   # non PR
     ab = (row[IDX_AB] or "").strip()   # PR
 
-    emj = emoji_for_tag(guild, c)
-    title = f"{b} {emj + ' ' if emj else ''}| {c} | **Level** {d} | **Spots:** {e}"
+    mention, url = emoji_for_tag(guild, c)
+    title = f"{b} {mention + ' ' if mention else ''}| {c} | **Level** {d} | **Spots:** {e}"
 
     lines = ["**Entry Criteria:**"]
     if z:
@@ -244,6 +250,8 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
         lines.append("—")
 
     ebd = discord.Embed(title=title, description="\n".join(lines))
+    if url:
+        ebd.set_thumbnail(url=url)  # bigger emoji
     ebd.set_footer(text=f"Filters used: {filters_text}")
     return ebd
 
