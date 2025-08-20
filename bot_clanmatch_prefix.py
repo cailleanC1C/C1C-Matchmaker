@@ -159,8 +159,8 @@ LAST_CALL = defaultdict(float)
 ACTIVE_PANELS = {}
 COOLDOWN_SEC = 2.0
 
-CB_CHOICES        = ["Hard", "Brutal", "NM", "UNM"]
-HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM", "UNM"]
+CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
+HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
@@ -442,6 +442,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
