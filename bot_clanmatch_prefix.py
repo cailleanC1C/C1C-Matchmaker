@@ -1,11 +1,12 @@
 # bot_clanmatch_prefix.py
 
-import os, json, time
+import os, json, time, asyncio
 import discord
 from discord.ext import commands
 from collections import defaultdict
 import gspread
 from google.oauth2.service_account import Credentials
+from aiohttp import web  # <- tiny keepalive web server
 
 # ---------- Google Sheets (Render-safe) ----------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
@@ -41,7 +42,6 @@ def map_token(choice: str) -> str:
     return TOKEN_MAP.get(c, c)
 
 def cell_has_diff(cell_text: str, token: str | None) -> bool:
-    """P/Q/R contain tokens; match mapped token (skip if filter None)."""
     if not token:
         return True
     t = map_token(token)
@@ -49,7 +49,6 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
     return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
-    """S/T are exact 1 or 0; skip if filter None."""
     if expected is None:
         return True
     return (cell_text or "").strip() == expected
@@ -73,17 +72,10 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
 
 # ---------- Formatting ----------
 def build_entry_criteria(row) -> str:
-    """
-    V/W labeled; X/Y/Z raw; AA/AB labeled; echo exact cell content. Bold only the prefix.
-    """
     parts = []
-    v = row[IDX_V].strip()
-    w = row[IDX_W].strip()
-    x = row[IDX_X].strip()
-    y = row[IDX_Y].strip()
-    z = row[IDX_Z].strip()
-    aa = row[IDX_AA].strip()
-    ab = row[IDX_AB].strip()
+    v = row[IDX_V].strip(); w = row[IDX_W].strip()
+    x = row[IDX_X].strip(); y = row[IDX_Y].strip(); z = row[IDX_Z].strip()
+    aa = row[IDX_AA].strip(); ab = row[IDX_AB].strip()
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -104,11 +96,10 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle) -> str:
     return " • ".join(parts) if parts else "—"
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    """First line as big title; entry criteria in description."""
     clan  = row[COL_B_CLAN].strip()
     tag   = row[COL_C_TAG].strip()
     spots = row[COL_E_SPOTS].strip()
-    title = f"{clan}  `{tag}`  — Spots: {spots}"
+    title = f"{clan}  `{tag}`  — Spots: {spots}"   # big line
     desc  = build_entry_criteria(row)
     e = discord.Embed(title=title, description=desc)
     e.set_footer(text=f"Filters used: {filters_text}")
@@ -120,8 +111,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # anti-dupe guard (one panel per user + short cooldown)
-LAST_CALL = defaultdict(float)   # user_id -> timestamp
-ACTIVE_PANELS = {}               # user_id -> message_id
+LAST_CALL = defaultdict(float)
+ACTIVE_PANELS = {}
 COOLDOWN_SEC = 2.0
 
 CB_CHOICES        = ["Hard", "Brutal", "NM", "UNM"]
@@ -130,20 +121,12 @@ CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
-    """
-    5 Discord UI rows max:
-      rows 0–3 => 4 selects
-      row 4    => CvC toggle, Siege toggle, Search button
-    """
+    """5 rows total: 4 selects + 1 row with 3 buttons (CvC, Siege, Search)."""
     def __init__(self, author_id: int):
         super().__init__(timeout=600)
         self.author_id = author_id
-        self.cb = None
-        self.hydra = None
-        self.chimera = None
-        self.playstyle = None
-        self.cvc = None    # "1"/"0"/None
-        self.siege = None  # "1"/"0"/None
+        self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
+        self.cvc = None; self.siege = None  # "1"/"0"/None
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
@@ -152,37 +135,29 @@ class ClanMatchView(discord.ui.View):
         return True
 
     # Row 0: CB
-    @discord.ui.select(
-        placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
-        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES]
-    )
+    @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
+                       options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.cb = select.values[0] if select.values else None
         await itx.response.defer()
 
     # Row 1: Hydra
-    @discord.ui.select(
-        placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
-        options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES]
-    )
+    @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
+                       options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
     async def hydra_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.hydra = select.values[0] if select.values else None
         await itx.response.defer()
 
     # Row 2: Chimera
-    @discord.ui.select(
-        placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
-        options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES]
-    )
+    @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
+                       options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
     async def chimera_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.chimera = select.values[0] if select.values else None
         await itx.response.defer()
 
     # Row 3: Playstyle
-    @discord.ui.select(
-        placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
-        options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES]
-    )
+    @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
+                       options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
     async def playstyle_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.playstyle = select.values[0] if select.values else None
         await itx.response.defer()
@@ -226,9 +201,8 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send(f"❌ Failed to read sheet: {e}", ephemeral=True)
             return
 
-        data_rows = rows[1:]
         matches = []
-        for row in data_rows:
+        for row in rows[1:]:
             try:
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     matches.append(row)
@@ -240,7 +214,6 @@ class ClanMatchView(discord.ui.View):
             return
 
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle)
-        # send in pages, up to 10 embeds per message
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
             embeds = [make_embed_for_row(r, filters_text) for r in chunk]
@@ -251,11 +224,10 @@ class ClanMatchView(discord.ui.View):
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
     now = time.time()
-    if now - LAST_CALL[ctx.author.id] < COOLDOWN_SEC:
+    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
     LAST_CALL[ctx.author.id] = now
 
-    # ensure single active panel per user
     old_id = ACTIVE_PANELS.pop(ctx.author.id, None)
     if old_id:
         try:
@@ -281,10 +253,28 @@ async def clanmatch_error(ctx, error):
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
 
-# ---------- Run ----------
-if __name__ == "__main__":
+# ---------- Tiny web server so Render sees a port ----------
+async def _health(_req):
+    return web.Response(text="ok")
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[keepalive] HTTP server listening on :{port}")
+
+# ---------- Run both web server and bot in the same loop ----------
+async def main():
+    asyncio.create_task(start_webserver())
     token = os.environ.get("DISCORD_TOKEN", "").strip()
     if not token or len(token) < 50:
         raise RuntimeError("Missing/short DISCORD_TOKEN.")
-    print("Starting bot…")
-    bot.run(token)
+    await bot.start(token)
+
+if __name__ == "__main__":
+    asyncio.run(main())
