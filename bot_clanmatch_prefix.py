@@ -71,6 +71,8 @@ COL_B_CLAN, COL_C_TAG, COL_E_SPOTS = 1, 2, 4
 COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
 # Entry Criteria V–AB
 IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
+# AC / AD / AE add-ons
+IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
 
 # ------------------- Matching helpers -------------------
 def norm(s: str) -> str:
@@ -141,12 +143,25 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, hide_full) 
     return " • ".join(parts)
 
 def make_embed_for_row(row, filters_text: str) -> discord.Embed:
-    clan  = (row[COL_B_CLAN] or "").strip()
-    tag   = (row[COL_C_TAG]  or "").strip()
-    spots = (row[COL_E_SPOTS] or "").strip()
+    """Header shows Reserved (AC) when present; body adds AE and AD lines."""
+    clan     = (row[COL_B_CLAN] or "").strip()
+    tag      = (row[COL_C_TAG]  or "").strip()
+    spots    = (row[COL_E_SPOTS] or "").strip()
+    reserved = (row[IDX_AC_RESERVED] or "").strip()        # AC
+    comments = (row[IDX_AD_COMMENTS] or "").strip()        # AD
+    addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()    # AE
+
     title = f"{clan}  `{tag}`  — Spots: {spots}"
-    desc  = build_entry_criteria(row)
-    e = discord.Embed(title=title, description=desc)
+    if reserved:
+        title += f" | Reserved: {reserved}"
+
+    lines = [build_entry_criteria(row)]
+    if addl_req:
+        lines.append(f"Additional Requirements: {addl_req}")
+    if comments:
+        lines.append(f"Clan Needs/Comments: {comments}")
+
+    e = discord.Embed(title=title, description="\n".join(lines))
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
@@ -167,7 +182,7 @@ PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Hide full, Reset, Search)."""
     def __init__(self, author_id: int):
-        super().__init__(timeout=1800)  # 30 min, was 600
+        super().__init__(timeout=1800)  # 30 min
         self.author_id = author_id
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
@@ -379,7 +394,6 @@ async def health_prefix(ctx: commands.Context):
         msg = f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}"
         await ctx.reply(msg, mention_author=False)
     except Exception as e:
-        # last-ditch: tell us what blew up instead of failing silently
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
 # Reload cache
@@ -442,7 +456,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
