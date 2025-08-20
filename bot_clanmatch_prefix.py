@@ -326,16 +326,19 @@ async def clanmatch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-embed = discord.Embed(
-    title="Find a C1C Clan for your recruit",
-    description=(
-        "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
-        "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
-        "Too many filters might narrow things down to zero."
-    )
-)
+    view = ClanMatchView(author_id=ctx.author.id)
+    view._sync_visuals()
 
-    # edit-in-place if a panel exists
+    embed = discord.Embed(
+        title="Find a C1C Clan for your recruit",
+        description=(
+            "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
+            "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
+            "Too many filters might narrow things down to zero."
+        )
+    )
+
+    # Try to edit your previous panel in place; if not found, send a new one
     old_id = ACTIVE_PANELS.get(ctx.author.id)
     if old_id:
         try:
@@ -347,7 +350,7 @@ embed = discord.Embed(
             pass
 
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
-    view.message = sent  # so on_timeout can edit
+    view.message = sent
     ACTIVE_PANELS[ctx.author.id] = sent.id
 
 @clanmatch_cmd.error
@@ -433,4 +436,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
