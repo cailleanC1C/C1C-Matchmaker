@@ -1,3 +1,5 @@
+# bot_clanmatch_prefix.py
+
 import os, json
 import discord
 from discord.ext import commands
@@ -25,6 +27,7 @@ COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16,
 # Entry Criteria V–AB
 IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
 
+# ---------- Matching helpers ----------
 def norm(s: str) -> str:
     return (s or "").strip().upper()
 
@@ -37,6 +40,7 @@ def map_token(choice: str) -> str:
     return TOKEN_MAP.get(c, c)
 
 def cell_has_diff(cell_text: str, token: str | None) -> bool:
+    """P/Q/R: comma-style token matching; if token is None, pass."""
     if not token:
         return True
     t = map_token(token)
@@ -44,9 +48,10 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
     return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
+    """S/T exact 1 or 0; if filter None, pass."""
     if expected is None:
         return True
-    return (cell_text or "").strip() == expected  # exact 1/0
+    return (cell_text or "").strip() == expected
 
 def playstyle_ok(cell_text: str, value: str | None) -> bool:
     if not value:
@@ -65,8 +70,9 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
+# ---------- Formatting ----------
 def build_entry_criteria(row) -> str:
-    # V/W labeled; X/Y/Z raw; AA/AB labeled; echo exact cell text
+    """V/W labeled; X/Y/Z raw; AA/AB labeled; echo exact cell text. Bold only prefix."""
     parts = []
     v = row[IDX_V].strip()
     w = row[IDX_W].strip()
@@ -75,6 +81,7 @@ def build_entry_criteria(row) -> str:
     z = row[IDX_Z].strip()
     aa = row[IDX_AA].strip()
     ab = row[IDX_AB].strip()
+
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -82,6 +89,7 @@ def build_entry_criteria(row) -> str:
     if z:  parts.append(z)
     if aa: parts.append(f"non PR CvC: {aa}")
     if ab: parts.append(f"PR CvC: {ab}")
+
     return "**Entry Criteria:** " + (" | ".join(parts) if parts else "—")
 
 def format_row_block(row) -> str:
@@ -108,19 +116,23 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 CB_CHOICES        = ["Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM", "UNM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
-YESNO_OPTIONS     = [("Yes (1)", "1"), ("No (0)", "0")]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
+    """
+    5 Discord UI rows max:
+      rows 0–3 => 4 selects
+      row 4    => CvC toggle, Siege toggle, Search button (3 buttons share the row)
+    """
     def __init__(self, author_id: int):
         super().__init__(timeout=600)
         self.author_id = author_id
         self.cb = None
         self.hydra = None
         self.chimera = None
-        self.cvc = None     # "1"/"0"
-        self.siege = None   # "1"/"0"
         self.playstyle = None
+        self.cvc = None    # "1"/"0"/None
+        self.siege = None  # "1"/"0"/None
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
@@ -128,43 +140,69 @@ class ClanMatchView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
+    # Row 0: CB
+    @discord.ui.select(
+        placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
+        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES]
+    )
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.cb = select.values[0] if select.values else None
         await itx.response.defer()
 
-    @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
+    # Row 1: Hydra
+    @discord.ui.select(
+        placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
+        options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES]
+    )
     async def hydra_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.hydra = select.values[0] if select.values else None
         await itx.response.defer()
 
-    @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
+    # Row 2: Chimera
+    @discord.ui.select(
+        placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
+        options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES]
+    )
     async def chimera_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.chimera = select.values[0] if select.values else None
         await itx.response.defer()
 
-    @discord.ui.select(placeholder="CvC Interest (Yes=1 / No=0) — optional", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=l, value=v) for l, v in YESNO_OPTIONS])
-    async def cvc_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.cvc = select.values[0] if select.values else None
-        await itx.response.defer()
-
-    @discord.ui.select(placeholder="Siege Interest (Yes=1 / No=0) — optional", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=l, value=v) for l, v in YESNO_OPTIONS])
-    async def siege_select(self, itx: discord.Interaction, select: discord.ui.Select):
-        self.siege = select.values[0] if select.values else None
-        await itx.response.defer()
-
-    @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1,
-                       options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
+    # Row 3: Playstyle
+    @discord.ui.select(
+        placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
+        options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES]
+    )
     async def playstyle_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.playstyle = select.values[0] if select.values else None
         await itx.response.defer()
 
-    @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary)
+    # Row 4: Buttons (CvC toggle, Siege toggle, Search)
+    def _cycle(self, current):  # None -> "1" -> "0" -> None
+        return "1" if current is None else ("0" if current == "1" else None)
+
+    def _toggle_label(self, name, value):
+        state = "—" if value is None else ("Yes" if value == "1" else "No")
+        return f"{name}: {state}"
+
+    @discord.ui.button(label="CvC: —", style=discord.ButtonStyle.secondary, row=4)
+    async def toggle_cvc(self, itx: discord.Interaction, button: discord.ui.Button):
+        self.cvc = self._cycle(self.cvc)
+        button.label = self._toggle_label("CvC", self.cvc)
+        button.style = discord.ButtonStyle.success if self.cvc == "1" else (
+            discord.ButtonStyle.danger if self.cvc == "0" else discord.ButtonStyle.secondary
+        )
+        await itx.response.edit_message(view=self)
+
+    @discord.ui.button(label="Siege: —", style=discord.ButtonStyle.secondary, row=4)
+    async def toggle_siege(self, itx: discord.Interaction, button: discord.ui.Button):
+        self.siege = self._cycle(self.siege)
+        button.label = self._toggle_label("Siege", self.siege)
+        button.style = discord.ButtonStyle.success if self.siege == "1" else (
+            discord.ButtonStyle.danger if self.siege == "0" else discord.ButtonStyle.secondary
+        )
+        await itx.response.edit_message(view=self)
+
+    @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂", ephemeral=True)
@@ -177,9 +215,8 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send(f"❌ Failed to read sheet: {e}", ephemeral=True)
             return
 
-        data_rows = rows[1:]
         matches = []
-        for row in data_rows:
+        for row in rows[1:]:
             try:
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     matches.append(row)
@@ -198,26 +235,28 @@ class ClanMatchView(discord.ui.View):
             embed.set_footer(text=f"Filters used: {filters_text}")
             await itx.followup.send(embed=embed, ephemeral=True)
 
-# ---------- Prefix command to open the panel ----------
+# ---------- Commands ----------
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
     view = ClanMatchView(author_id=ctx.author.id)
     embed = discord.Embed(
         title="Find a C1C Clan",
         description=(
-            "Choose any filters you like (leave others blank) and click **Search Clans**.\n"
-            "Filters: **P–U** (CB/Hydra/Chimera + CvC(1/0) + Siege(1/0) + Playstyle)\n"
+            "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
+            "Filters checked: **P–U** (CB/Hydra/Chimera + CvC(1/0) + Siege(1/0) + Playstyle)\n"
             "Output: **B/C/D** + **V–AB** as Entry Criteria."
         )
     )
     await ctx.reply(embed=embed, view=view, mention_author=False)
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} — prefix commands ready.")
+@bot.command(name="ping")
+async def ping(ctx):
+    await ctx.send("✅ I’m alive and listening, captain!")
 
+# ---------- Run ----------
 if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        raise RuntimeError("Missing DISCORD_TOKEN env var.")
+    token = os.environ.get("DISCORD_TOKEN", "").strip()
+    if not token or len(token) < 50:
+        raise RuntimeError("Missing/short DISCORD_TOKEN.")
+    print("Starting bot…")
     bot.run(token)
