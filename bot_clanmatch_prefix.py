@@ -143,20 +143,16 @@ def emoji_for_tag(guild: discord.Guild | None, tag: str | None) -> tuple[str, st
 
 # ------------------- Formatting -------------------
 def build_entry_criteria_classic(row) -> str:
-    """
-    For !clanmatch output: inner labels not bold; item spacing via NBSP pipes.
-    """
+    """For !clanmatch output: inner labels not bold; spacing via NBSP pipes."""
     NBSP_PIPE = "\u00A0|\u00A0"
     parts = []
-
     v  = (row[IDX_V]  or "").strip()   # Hydra keys
     w  = (row[IDX_W]  or "").strip()   # Chimera keys
-    x  = (row[IDX_X]  or "").strip()   # Hydra Clash (verbatim)
-    y  = (row[IDX_Y]  or "").strip()   # Chimera Clash (verbatim)
-    z  = (row[IDX_Z]  or "").strip()   # CB Damage (verbatim)
+    x  = (row[IDX_X]  or "").strip()   # Hydra Clash
+    y  = (row[IDX_Y]  or "").strip()   # Chimera Clash
+    z  = (row[IDX_Z]  or "").strip()   # CB Damage / text
     aa = (row[IDX_AA] or "").strip()   # non PR CvC
     ab = (row[IDX_AB] or "").strip()   # PR CvC
-
     if v:  parts.append(f"Hydra keys: {v}")
     if w:  parts.append(f"Chimera keys: {w}")
     if x:  parts.append(x)
@@ -164,7 +160,6 @@ def build_entry_criteria_classic(row) -> str:
     if z:  parts.append(z)
     if aa: parts.append(f"non PR CvC: {aa}")
     if ab: parts.append(f"PR CvC: {ab}")
-
     return "**Entry Criteria:** " + (NBSP_PIPE.join(parts) if parts else "—")
 
 def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode) -> str:
@@ -175,7 +170,6 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     if cvc is not None:   parts.append(f"CvC: {'Yes' if cvc == '1' else 'No'}")
     if siege is not None: parts.append(f"Siege: {'Yes' if siege == '1' else 'No'}")
     if playstyle: parts.append(f"Playstyle: {playstyle}")
-
     roster_text = "All" if roster_mode is None else ("Open only" if roster_mode == "open" else "Full only")
     parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
@@ -189,8 +183,9 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
-    mention, url = emoji_for_tag(guild, tag)
-    title = f"{clan} {mention + ' ' if mention else ''}`{tag}`  — Spots: {spots}"
+    # no inline emoji in title anymore; thumbnail only
+    _, url = emoji_for_tag(guild, tag)
+    title = f"{clan} `{tag}`  — Spots: {spots}"
     if reserved:
         title += f" | Reserved: {reserved}"
 
@@ -202,58 +197,57 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
     if url:
-        e.set_thumbnail(url=url)  # bigger emoji
+        e.set_thumbnail(url=url)  # bigger emoji at the side
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
 def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     """
-    Structured output for !clansearch (no column letters shown; skip empty lines).
-    First line: (B) | (C) | Level (D) | Spots (E) + emoji mention + thumbnail.
+    Structured output for !clansearch (skip empty criteria lines).
+    First line: Clan | TAG | Level D | Spots E (no inline emoji, use thumbnail).
     """
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
     d = (row[COL_D_LEVEL] or "").strip()
-    e = (row[COL_E_SPOTS] or "").strip()
+    e_spots = (row[COL_E_SPOTS] or "").strip()
 
-    v  = (row[IDX_V]  or "").strip()   # Hydra keys
-    w  = (row[IDX_W]  or "").strip()   # Chimera keys
-    x  = (row[IDX_X]  or "").strip()   # Hydra descriptor
-    y  = (row[IDX_Y]  or "").strip()   # Chimera descriptor
-    z  = (row[IDX_Z]  or "").strip()   # Clan Boss / CB Damage
-    aa = (row[IDX_AA] or "").strip()   # non PR
-    ab = (row[IDX_AB] or "").strip()   # PR
+    v  = (row[IDX_V]  or "").strip()
+    w  = (row[IDX_W]  or "").strip()
+    x  = (row[IDX_X]  or "").strip()
+    y  = (row[IDX_Y]  or "").strip()
+    z  = (row[IDX_Z]  or "").strip()
+    aa = (row[IDX_AA] or "").strip()
+    ab = (row[IDX_AB] or "").strip()
 
-    mention, url = emoji_for_tag(guild, c)
-    title = f"{b} {mention + ' ' if mention else ''}| {c} | **Level** {d} | **Spots:** {e}"
+    _, url = emoji_for_tag(guild, c)
+    title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
 
     lines = ["**Entry Criteria:**"]
     if z:
         lines.append(f"Clan Boss: {z}")
     if v or x:
-        hx_parts = []
-        if v: hx_parts.append(f"{v} keys")
-        if x: hx_parts.append(x)
-        lines.append("Hydra: " + " — ".join(hx_parts))
+        hx = []
+        if v: hx.append(f"{v} keys")
+        if x: hx.append(x)
+        lines.append("Hydra: " + " — ".join(hx))
     if w or y:
-        cy_parts = []
-        if w: cy_parts.append(f"{w} keys")
-        if y: cy_parts.append(y)
-        lines.append("Chimera: " + " — ".join(cy_parts))
+        cy = []
+        if w: cy.append(f"{w} keys")
+        if y: cy.append(y)
+        lines.append("Chimera: " + " — ".join(cy))
     if aa or ab:
         cvc_bits = []
         if aa: cvc_bits.append(f"non PR minimum: {aa}")
         if ab: cvc_bits.append(f"PR minimum: {ab}")
         lines.append("CvC: " + " | ".join(cvc_bits))
-
     if len(lines) == 1:
         lines.append("—")
 
-    ebd = discord.Embed(title=title, description="\n".join(lines))
+    e = discord.Embed(title=title, description="\n".join(lines))
     if url:
-        ebd.set_thumbnail(url=url)  # bigger emoji
-    ebd.set_footer(text=f"Filters used: {filters_text}")
-    return ebd
+        e.set_thumbnail(url=url)
+    e.set_footer(text=f"Filters used: {filters_text}")
+    return e
 
 # ------------------- Discord bot -------------------
 intents = discord.Intents.default()
@@ -261,7 +255,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
-ACTIVE_PANELS = {}
+# key by (user_id, variant) so clanmatch & clansearch have independent panels
+ACTIVE_PANELS: dict[tuple[int,str], int] = {}
 COOLDOWN_SEC = 2.0
 
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
@@ -280,7 +275,6 @@ class ClanMatchView(discord.ui.View):
         self.roster_mode: str | None = None   # None = All, 'open' = Spots > 0, 'full' = Spots <= 0
         self.message: discord.Message | None = None  # set after sending
 
-    # on-timeout: disable + mark expired
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
@@ -294,7 +288,6 @@ class ClanMatchView(discord.ui.View):
         except Exception as e:
             print("[view timeout] failed to edit:", e)
 
-    # visual sync so selects and toggles reflect current state
     def _sync_visuals(self):
         for child in self.children:
             if isinstance(child, discord.ui.Select):
@@ -454,6 +447,7 @@ class ClanMatchView(discord.ui.View):
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
+    """Detailed panel with tips."""
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -471,7 +465,8 @@ async def clanmatch_cmd(ctx: commands.Context):
         )
     )
 
-    old_id = ACTIVE_PANELS.get(ctx.author.id)
+    key = (ctx.author.id, "classic")
+    old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
             msg = await ctx.channel.fetch_message(old_id)
@@ -483,12 +478,12 @@ async def clanmatch_cmd(ctx: commands.Context):
 
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
     view.message = sent
-    ACTIVE_PANELS[ctx.author.id] = sent.id
+    ACTIVE_PANELS[key] = sent.id
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context):
-    """Same panel, different panel text + result format."""
+    """Concise panel for search."""
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -505,7 +500,8 @@ async def clansearch_cmd(ctx: commands.Context):
         )
     )
 
-    old_id = ACTIVE_PANELS.get(ctx.author.id)
+    key = (ctx.author.id, "search")
+    old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
             msg = await ctx.channel.fetch_message(old_id)
@@ -517,7 +513,7 @@ async def clansearch_cmd(ctx: commands.Context):
 
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
     view.message = sent
-    ACTIVE_PANELS[ctx.author.id] = sent.id
+    ACTIVE_PANELS[key] = sent.id
 
 @clanmatch_cmd.error
 async def clanmatch_error(ctx, error):
