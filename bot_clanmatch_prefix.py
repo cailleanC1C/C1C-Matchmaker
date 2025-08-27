@@ -80,14 +80,10 @@ def clear_cache():
 COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
 COL_F_PROGRESSION, COL_G_LEAD, COL_H_DEPUTIES = 5, 6, 7
 COL_I_CVC_TIER, COL_J_CVC_WINS, COL_K_SIEGE_TIER, COL_L_SIEGE_WINS = 8, 9, 10, 11
-# M/N/O = 12,13,14
-COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14
-# Filters P–U
-COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
-# Entry Criteria V–AB
-IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
-# AC / AD / AE add-ons
-IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
+COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14                # M/N/O
+COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20  # P–U
+IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27                  # V–AB
+IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30                               # AC/AD/AE
 
 # ------------------- Helpers -------------------
 def norm(s: str) -> str:
@@ -167,7 +163,6 @@ def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | N
         return None
     size = size or EMOJI_PAD_SIZE
     box  = box  or EMOJI_PAD_BOX
-    # cache-buster so CDN changes propagate (emoji asset id)
     q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box), "v": str(emj.id)})
     return f"{base.rstrip('/')}/emoji-pad?{q}"
 
@@ -291,7 +286,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
-ACTIVE_PANELS: dict[tuple[int,str], int] = {}
+ACTIVE_PANELS: dict[tuple[int, str], int] = {}
 COOLDOWN_SEC = 2.0
 
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
@@ -299,18 +294,44 @@ HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
+# ---- small helper: safely delete a message (ignore perms/404) ----
+async def _safe_delete(msg: discord.Message | None):
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+# ---- helper: build panel intro embed with "summoned" line ----
+def build_panel_intro_embed(user: discord.abc.User, variant: str, private: bool) -> discord.Embed:
+    top_line = f"**{user.mention} has summoned C1C-Matchmaker**\n\n"
+    if variant == "search":
+        desc = top_line + "Pick any filters *(you can leave some blank)* and click **Search Clans** to see Entry Criteria and open Spots."
+        title = "Search for a C1C Clan" + (" (Private)" if private else "")
+    else:
+        desc = (top_line +
+                "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
+                "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
+                "Too many filters might narrow things down to zero.")
+        title = "Find a C1C Clan" + (" (Private)" if private else " for your recruit")
+    return discord.Embed(title=title, description=desc)
+
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Roster, Reset, Search)."""
-    def __init__(self, author_id: int, embed_variant: str = "classic"):
+    def __init__(self, author_id: int, embed_variant: str = "classic", ephemeral_mode: bool = False):
         super().__init__(timeout=1800)  # 30 min
         self.author_id = author_id
         self.embed_variant = embed_variant  # "classic" or "search"
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
         self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
-        self.message: discord.Message | None = None  # set after sending
+        self.message: discord.Message | None = None  # set after sending (for public panels)
+        self.ephemeral_mode = ephemeral_mode
 
     async def on_timeout(self):
+        if self.ephemeral_mode:
+            return
         for child in self.children:
             child.disabled = True
         try:
@@ -358,7 +379,7 @@ class ClanMatchView(discord.ui.View):
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
-            await itx.response.send_message("This panel isn’t yours—run `!clanmatch` or `!clansearch` to get your own. 🙂", ephemeral=True)
+            await itx.response.send_message("This panel isn’t yours—run the command to get your own. 🙂", ephemeral=True)
             return False
         return True
 
@@ -410,7 +431,6 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
-        # Cycle: None -> 'open' -> 'full' -> None
         if self.roster_mode is None:
             self.roster_mode = "open"
         elif self.roster_mode == "open":
@@ -435,14 +455,17 @@ class ClanMatchView(discord.ui.View):
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
-            await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
+            await itx.response.send_message(
+                "Pick at least **one** filter, then try again. 🙂",
+                ephemeral=self.ephemeral_mode
+            )
             return
 
-        await itx.response.defer(thinking=True)  # public results
+        await itx.response.defer(thinking=True)
         try:
             rows = get_rows(False)
         except Exception as e:
-            await itx.followup.send(f"❌ Failed to read sheet: {e}")
+            await itx.followup.send(f"❌ Failed to read sheet: {e}", ephemeral=self.ephemeral_mode)
             return
 
         matches = []
@@ -461,18 +484,73 @@ class ClanMatchView(discord.ui.View):
                 continue
 
         if not matches:
-            await itx.followup.send("No matching clans found. Try a different combo.")
+            await itx.followup.send("No matching clans found. Try a different combo.", ephemeral=self.ephemeral_mode)
             return
 
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
         builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
+        guild_for_emojis = itx.guild
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
-            embeds = [builder(r, filters_text, itx.guild) for r in chunk]
-            await itx.followup.send(embeds=embeds)
+            embeds = [builder(r, filters_text, guild_for_emojis) for r in chunk]
+            await itx.followup.send(embeds=embeds, ephemeral=self.ephemeral_mode)
 
-# ------------------- Commands: panels -------------------
+# ---- Launcher for clanmatch (private-first; private path deletes launcher + cmd) ----
+class PanelLauncherView(discord.ui.View):
+    """Launcher: private-first. Private deletes both launcher and the original command."""
+    def __init__(self, author_id: int, embed_variant: str, command_message_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.embed_variant = embed_variant
+        self.command_message_id = command_message_id
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user.id != self.author_id:
+            await itx.response.send_message("This launcher is for someone else. Run `!clanmatch` to get your own. 🙂", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Open Private Panel", style=discord.ButtonStyle.primary, row=0, custom_id="launch_private")
+    async def open_private(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        view = ClanMatchView(
+            author_id=itx.user.id,
+            embed_variant=self.embed_variant,
+            ephemeral_mode=True
+        )
+        view._sync_visuals()
+
+        embed = build_panel_intro_embed(itx.user, "classic", private=True)
+        await itx.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # Delete launcher and original command
+        await _safe_delete(itx.message)
+        if itx.channel and self.command_message_id:
+            try:
+                cmd_msg = await itx.channel.fetch_message(self.command_message_id)
+                await _safe_delete(cmd_msg)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Post Public Panel", style=discord.ButtonStyle.secondary, row=0, custom_id="launch_public")
+    async def open_public(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        view = ClanMatchView(
+            author_id=itx.user.id,
+            embed_variant=self.embed_variant,
+            ephemeral_mode=False
+        )
+        view._sync_visuals()
+
+        embed = build_panel_intro_embed(itx.user, "classic", private=False)
+
+        try:
+            await itx.response.edit_message(embed=embed, view=view)
+            view.message = itx.message  # track for timeout edits
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embed=embed, view=view)
+            view.message = itx.message
+
+# ------------------- Commands -------------------
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
@@ -481,32 +559,34 @@ async def clanmatch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-    view = ClanMatchView(author_id=ctx.author.id, embed_variant="classic")
-    view._sync_visuals()
-
-    embed = discord.Embed(
-        title="Find a C1C Clan for your recruit",
-        description=(
-            "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
-            "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
-            "Too many filters might narrow things down to zero."
-        )
+    # Private-first launcher
+    launch = PanelLauncherView(
+        author_id=ctx.author.id,
+        embed_variant="classic",
+        command_message_id=ctx.message.id
+        # The command message gets deleted when "Open Private Panel" is clicked.
+    )
+    launcher_embed = discord.Embed(
+        title="Start Clan Matching (Private-first)",
+        description="Click **Open Private Panel** to work silently (only you can see it), or **Post Public Panel** if you want the whole thread to follow along."
     )
 
-    key = (ctx.author.id, "classic")
+    key = (ctx.author.id, "classic_launch")
     old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
             msg = await ctx.channel.fetch_message(old_id)
-            view.message = msg
-            await msg.edit(embed=embed, view=view)
+            await msg.edit(embed=launcher_embed, view=launch)
+            # Auto-delete the invoking command now that launcher is posted
+            await _safe_delete(ctx.message)
             return
         except Exception:
             pass
 
-    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
-    view.message = sent
+    sent = await ctx.reply(embed=launcher_embed, view=launch, mention_author=False)
     ACTIVE_PANELS[key] = sent.id
+    # Auto-delete the invoking command
+    await _safe_delete(ctx.message)
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
@@ -516,13 +596,11 @@ async def clansearch_cmd(ctx: commands.Context):
         return
     LAST_CALL[ctx.author.id] = now
 
-    view = ClanMatchView(author_id=ctx.author.id, embed_variant="search")
+    # Public panel (unchanged behavior, but now with "summoned" line)
+    view = ClanMatchView(author_id=ctx.author.id, embed_variant="search", ephemeral_mode=False)
     view._sync_visuals()
 
-    embed = discord.Embed(
-        title="Search for a C1C Clan",
-        description="Pick any filters *(you can leave some blank)* and click **Search Clans** to see Entry Criteria and open Spots."
-    )
+    embed = build_panel_intro_embed(ctx.author, "search", private=False)
 
     key = (ctx.author.id, "search")
     old_id = ACTIVE_PANELS.get(key)
@@ -531,6 +609,7 @@ async def clansearch_cmd(ctx: commands.Context):
             msg = await ctx.channel.fetch_message(old_id)
             view.message = msg
             await msg.edit(embed=embed, view=view)
+            await _safe_delete(ctx.message)  # delete invoking command
             return
         except Exception:
             pass
@@ -538,6 +617,7 @@ async def clansearch_cmd(ctx: commands.Context):
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
+    await _safe_delete(ctx.message)  # delete invoking command
 
 # ------------------- Clan profile command -------------------
 def find_clan_row(query: str):
@@ -565,7 +645,6 @@ def find_clan_row(query: str):
     return exact_tag or exact_name or (partials[0] if partials else None)
 
 def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
-    # Top line with rank fallback
     rank_raw = (row[COL_A_RANK] or "").strip()
     rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
 
@@ -573,22 +652,18 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
     tag   = (row[COL_C_TAG]         or "").strip()
     lvl   = (row[COL_D_LEVEL]       or "").strip()
 
-    # Leadership
     lead  = (row[COL_G_LEAD]        or "").strip()
     deps  = (row[COL_H_DEPUTIES]    or "").strip()
 
-    # Ranges
     cb    = (row[COL_M_CB]          or "").strip()
     hydra = (row[COL_N_HYDRA]       or "").strip()
     chim  = (row[COL_O_CHIMERA]     or "").strip()
 
-    # CvC / Siege
     cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
     cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
     sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
     sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
 
-    # Footer
     prog  = (row[COL_F_PROGRESSION] or "").strip()
     style = (row[COL_U_STYLE]       or "").strip()
 
@@ -625,22 +700,27 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
 @bot.command(name="clanprofile", aliases=["clan", "cp"])
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
     if not query:
-        await ctx.reply("Usage: `!clan <tag or name>` — e.g., `!clan C1CE` or `!clan Elders`", mention_author=False)
+        m = await ctx.reply("Usage: `!clan <tag or name>` — e.g., `!clan C1CE` or `!clan Elders`", mention_author=False)
+        await _safe_delete(ctx.message)
         return
     try:
         row = find_clan_row(query)
         if not row:
-            await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
+            m = await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
+            await _safe_delete(ctx.message)
             return
         embed = make_embed_for_profile(row, ctx.guild)
         await ctx.reply(embed=embed, mention_author=False)
+        await _safe_delete(ctx.message)  # delete invoking command after posting result
     except Exception as e:
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
+        await _safe_delete(ctx.message)
 
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
+    await _safe_delete(ctx.message)
 
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
@@ -654,16 +734,18 @@ async def health_prefix(ctx: commands.Context):
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
         await ctx.reply(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}",
                         mention_author=False)
-    except Exception as e:
-        await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
+    finally:
+        await _safe_delete(ctx.message)
 
 @bot.command(name="reload")
 async def reload_cache_cmd(ctx):
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
+    await _safe_delete(ctx.message)
 
 @bot.tree.command(name="health", description="Bot & Sheets status")
 async def health_slash(itx: discord.Interaction):
+    # Slash commands have no text message to delete
     await itx.response.defer(thinking=False, ephemeral=False)
     try:
         ws = get_ws(False)
@@ -705,9 +787,9 @@ async def emoji_pad_handler(request: web.Request):
 
         img = Image.open(io.BytesIO(raw)).convert("RGBA")
 
-        # --- NEW: Trim transparent borders so glyph is truly centered ---
+        # Trim transparent borders so glyph is truly centered
         alpha = img.split()[-1]
-        bbox = alpha.getbbox()  # minimal non-transparent bounding box
+        bbox = alpha.getbbox()
         if bbox:
             img = img.crop(bbox)
 
