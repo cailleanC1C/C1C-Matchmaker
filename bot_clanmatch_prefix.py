@@ -136,7 +136,7 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
-# ---- robust delete helper (scheduled to avoid race) ----
+# ---- robust delete helper (scheduled) ----
 def schedule_delete(msg: discord.Message | None, delay: float = 0.0):
     async def _do_delete(m: discord.Message | None, d: float):
         if not m: return
@@ -297,8 +297,10 @@ LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int, str], int] = {}
 COOLDOWN_SEC = 2.0
 
-# map: message_id -> {"row": row, "filters": str, "guild_id": int, "channel_id": int}
-ENTRY_REACT_INDEX: dict[int, dict] = {}
+# Generic reaction index:
+# message_id -> {"row": row, "kind": "entry_from_profile" | "profile_from_search",
+#                "guild_id": int, "channel_id": int, "filters": str}
+REACT_INDEX: dict[int, dict] = {}
 
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
@@ -484,12 +486,32 @@ class ClanMatchView(discord.ui.View):
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege,
                                              self.playstyle, self.roster_mode)
 
-        # Chunked output for all variants (no 💡 reactions here)
-        builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
-        for i in range(0, len(matches), 10):
-            chunk = matches[i:i+10]
-            embeds = [builder(r, filters_text, itx.guild) for r in chunk]
-            await itx.followup.send(embeds=embeds, ephemeral=self.ephemeral_mode)
+        # If we're in "search" variant, send ONE embed per message so 💡 maps 1:1 to a clan.
+        if self.embed_variant == "search":
+            for r in matches:
+                embed = make_embed_for_row_search(r, filters_text, itx.guild)
+                # Append hint about the bulb
+                footer = embed.footer.text or ""
+                hint = "React with 💡 for Clan Profile"
+                embed.set_footer(text=(f"{footer} • {hint}" if footer else hint))
+                msg = await itx.followup.send(embed=embed, ephemeral=self.ephemeral_mode)
+                if not self.ephemeral_mode:
+                    # index the reaction → show profile
+                    try: await msg.add_reaction("💡")
+                    except Exception: pass
+                    REACT_INDEX[msg.id] = {
+                        "row": r, "kind": "profile_from_search",
+                        "guild_id": itx.guild.id if itx.guild else None,
+                        "channel_id": msg.channel.id,
+                        "filters": filters_text,
+                    }
+        else:
+            # Classic results: keep chunking
+            builder = make_embed_for_row_classic
+            for i in range(0, len(matches), 10):
+                chunk = matches[i:i+10]
+                embeds = [builder(r, filters_text, itx.guild) for r in chunk]
+                await itx.followup.send(embeds=embeds, ephemeral=self.ephemeral_mode)
 
 # ---- private-first launcher for !clanmatch ----
 class PanelLauncherView(discord.ui.View):
@@ -590,7 +612,7 @@ async def clansearch_cmd(ctx: commands.Context):
     ACTIVE_PANELS[key] = sent.id
     schedule_delete(ctx.message, 0.1)
 
-# ------------------- Clan profile command (+ 💡 reaction) -------------------
+# ------------------- Clan profile command (+ 💡 reaction to show Entry Criteria) -------------------
 def find_clan_row(query: str):
     if not query: return None
     q = query.strip().upper()
@@ -651,7 +673,6 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
 
     e = discord.Embed(title=title, description="\n".join(lines))
     _set_thumb_with_padding(e, guild, tag)
-    # Footer to teach the 💡 behavior
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
@@ -669,21 +690,18 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         embed = make_embed_for_profile(row, ctx.guild)
         msg = await ctx.reply(embed=embed, mention_author=False)
 
-        # Add 💡 and index so on_raw_reaction_add knows what to send
-        try:
-            await msg.add_reaction("💡")
-        except Exception:
-            pass
-        ENTRY_REACT_INDEX[msg.id] = {
-            "row": row,
-            "filters": "Profile",  # not really used in the card, but kept for consistency
+        try: await msg.add_reaction("💡")
+        except Exception: pass
+        REACT_INDEX[msg.id] = {
+            "row": row, "kind": "entry_from_profile",
             "guild_id": ctx.guild.id if ctx.guild else None,
             "channel_id": msg.channel.id,
+            "filters": "Profile"
         }
     finally:
         schedule_delete(ctx.message, 0.1)
 
-# ------------------- Reaction → show Entry Criteria card for !clan -------------------
+# ------------------- Reaction handler -------------------
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
@@ -691,21 +709,24 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             return
         if str(payload.emoji) != "💡":
             return
-        info = ENTRY_REACT_INDEX.get(payload.message_id)
+        info = REACT_INDEX.get(payload.message_id)
         if not info:
             return
 
         guild = bot.get_guild(info["guild_id"])
         row = info["row"]
-        filters = info.get("filters", "")
         channel = bot.get_channel(info["channel_id"]) or await bot.fetch_channel(info["channel_id"])
+
+        # Build the right card based on mapping kind
+        if info["kind"] == "entry_from_profile":
+            embed = make_embed_for_row_search(row, info.get("filters", ""), guild)
+        else:  # profile_from_search
+            embed = make_embed_for_profile(row, guild)
 
         try:
             src_msg = await channel.fetch_message(payload.message_id)
-            embed = make_embed_for_row_search(row, filters, guild)
             await channel.send(embed=embed, reference=src_msg)
         except Exception:
-            embed = make_embed_for_row_search(row, filters, guild)
             await channel.send(embed=embed)
     except Exception as e:
         print("[react] error:", e)
