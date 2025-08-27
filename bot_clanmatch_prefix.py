@@ -148,12 +148,11 @@ def schedule_delete(msg: discord.Message | None, delay: float = 0.0):
     try:
         asyncio.create_task(_do_delete(msg, delay))
     except RuntimeError:
-        # fallback if loop not running yet
         pass
 
 # ---- emoji helpers ----
 def emoji_for_tag(guild: discord.Guild | None, tag: str | None):
-    """Return emoji by name; case-insensitive fallback to avoid mismatches."""
+    """Return emoji by name; case-insensitive fallback."""
     if not guild or not tag:
         return None
     name = tag.strip()
@@ -216,7 +215,6 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     return " • ".join(parts)
 
 def _set_thumb_with_padding(embed: discord.Embed, guild: discord.Guild | None, tag: str | None):
-    """Always prefer padded proxy; only raw fallback if permitted."""
     url = padded_emoji_url(guild, tag)
     if url:
         embed.set_thumbnail(url=url)
@@ -292,18 +290,21 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
 # ------------------- Discord bot -------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int, str], int] = {}
 COOLDOWN_SEC = 2.0
 
+# map: message_id -> {"row": row, "filters": str, "guild_id": int, "channel_id": int}
+ENTRY_REACT_INDEX: dict[int, dict] = {}
+
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
-# ---- launcher delete helper ----
 def build_panel_intro_embed(user: discord.abc.User, variant: str, private: bool) -> discord.Embed:
     top = f"**{user.mention} has summoned C1C-Matchmaker**\n\n"
     if variant == "search":
@@ -482,9 +483,9 @@ class ClanMatchView(discord.ui.View):
 
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege,
                                              self.playstyle, self.roster_mode)
-        builder = make_embed_for_row_search if self.embed_variant == "search" \
-                  else make_embed_for_row_classic
 
+        # Chunked output for all variants (no 💡 reactions here)
+        builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
         for i in range(0, len(matches), 10):
             chunk = matches[i:i+10]
             embeds = [builder(r, filters_text, itx.guild) for r in chunk]
@@ -512,7 +513,6 @@ class PanelLauncherView(discord.ui.View):
         embed = build_panel_intro_embed(itx.user, "classic", private=True)
         await itx.response.send_message(embed=embed, view=view, ephemeral=True)
 
-        # delete launcher + original command
         schedule_delete(itx.message, 0.1)
         try:
             cmd_msg = await itx.channel.fetch_message(self.command_message_id)
@@ -590,7 +590,7 @@ async def clansearch_cmd(ctx: commands.Context):
     ACTIVE_PANELS[key] = sent.id
     schedule_delete(ctx.message, 0.1)
 
-# ------------------- Clan profile command -------------------
+# ------------------- Clan profile command (+ 💡 reaction) -------------------
 def find_clan_row(query: str):
     if not query: return None
     q = query.strip().upper()
@@ -651,6 +651,8 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
 
     e = discord.Embed(title=title, description="\n".join(lines))
     _set_thumb_with_padding(e, guild, tag)
+    # Footer to teach the 💡 behavior
+    e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
 @bot.command(name="clanprofile", aliases=["clan", "cp"])
@@ -663,10 +665,50 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         if not row:
             await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
             schedule_delete(ctx.message, 0.1); return
+
         embed = make_embed_for_profile(row, ctx.guild)
-        await ctx.reply(embed=embed, mention_author=False)
+        msg = await ctx.reply(embed=embed, mention_author=False)
+
+        # Add 💡 and index so on_raw_reaction_add knows what to send
+        try:
+            await msg.add_reaction("💡")
+        except Exception:
+            pass
+        ENTRY_REACT_INDEX[msg.id] = {
+            "row": row,
+            "filters": "Profile",  # not really used in the card, but kept for consistency
+            "guild_id": ctx.guild.id if ctx.guild else None,
+            "channel_id": msg.channel.id,
+        }
     finally:
         schedule_delete(ctx.message, 0.1)
+
+# ------------------- Reaction → show Entry Criteria card for !clan -------------------
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    try:
+        if not payload.guild_id or payload.user_id == (bot.user.id if bot.user else None):
+            return
+        if str(payload.emoji) != "💡":
+            return
+        info = ENTRY_REACT_INDEX.get(payload.message_id)
+        if not info:
+            return
+
+        guild = bot.get_guild(info["guild_id"])
+        row = info["row"]
+        filters = info.get("filters", "")
+        channel = bot.get_channel(info["channel_id"]) or await bot.fetch_channel(info["channel_id"])
+
+        try:
+            src_msg = await channel.fetch_message(payload.message_id)
+            embed = make_embed_for_row_search(row, filters, guild)
+            await channel.send(embed=embed, reference=src_msg)
+        except Exception:
+            embed = make_embed_for_row_search(row, filters, guild)
+            await channel.send(embed=embed)
+    except Exception as e:
+        print("[react] error:", e)
 
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
@@ -719,10 +761,15 @@ async def on_ready():
 async def _health_http(_req): return web.Response(text="ok")
 
 async def emoji_pad_handler(request: web.Request):
+    """
+    /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>&v=<cache-buster>
+    Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
+    """
     src = request.query.get("u")
     size = int(request.query.get("s", str(EMOJI_PAD_SIZE)))
     box  = float(request.query.get("box", str(EMOJI_PAD_BOX)))
-    if not src: return web.Response(status=400, text="missing u")
+    if not src:
+        return web.Response(status=400, text="missing u")
     try:
         async with request.app["session"].get(src) as resp:
             if resp.status != 200:
@@ -730,10 +777,14 @@ async def emoji_pad_handler(request: web.Request):
             raw = await resp.read()
 
         img = Image.open(io.BytesIO(raw)).convert("RGBA")
+
+        # Trim transparent borders
         alpha = img.split()[-1]
         bbox = alpha.getbbox()
-        if bbox: img = img.crop(bbox)
+        if bbox:
+            img = img.crop(bbox)
 
+        # Scale glyph to fit target box
         w, h = img.size
         max_side = max(w, h)
         target   = max(1, int(size * box))
@@ -742,15 +793,19 @@ async def emoji_pad_handler(request: web.Request):
         new_h    = max(1, int(h * scale))
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
+        # Center on square canvas
         canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        x = (size - new_w) // 2; y = (size - new_h) // 2
+        x = (size - new_w) // 2
+        y = (size - new_h) // 2
         canvas.paste(img, (x, y), img)
 
         out = io.BytesIO()
         canvas.save(out, format="PNG")
-        return web.Response(body=out.getvalue(),
-                            headers={"Cache-Control": "public, max-age=86400"},
-                            content_type="image/png")
+        return web.Response(
+            body=out.getvalue(),
+            headers={"Cache-Control": "public, max-age=86400"},
+            content_type="image/png",
+        )
     except Exception as e:
         return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
