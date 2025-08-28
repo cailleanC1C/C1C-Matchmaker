@@ -1,18 +1,28 @@
 # bot_clanmatch_prefix.py
+# C1C-Matchmaker — panels, search, profiles, emoji padding, and reaction flip (💡)
 
 import os, json, time, asyncio, re, traceback, urllib.parse, io
+from collections import defaultdict
+
 import discord
 from discord.ext import commands
 from discord import InteractionResponded
 from discord.utils import get
-from collections import defaultdict
+
 import gspread
 from google.oauth2.service_account import Credentials
+
 from aiohttp import web, ClientSession
 from PIL import Image  # Pillow
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
+
+def _fmt_uptime():
+    secs = int(time.time() - START_TS)
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 # ------------------- ENV -------------------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
@@ -42,13 +52,7 @@ _cache_rows = None
 _cache_time = 0.0
 CACHE_TTL = 60  # seconds
 
-def _fmt_uptime():
-    secs = int(time.time() - START_TS)
-    h, r = divmod(secs, 3600)
-    m, s = divmod(r, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-def get_ws(force=False):
+def get_ws(force: bool = False):
     """Connect to Google Sheets only when needed."""
     global _gc, _ws
     if force:
@@ -61,7 +65,7 @@ def get_ws(force=False):
     print("[sheets] Connected to worksheet OK", flush=True)
     return _ws
 
-def get_rows(force=False):
+def get_rows(force: bool = False):
     """Return all rows with simple 60s cache."""
     global _cache_rows, _cache_time
     if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
@@ -80,16 +84,23 @@ def clear_cache():
 COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
 COL_F_PROGRESSION, COL_G_LEAD, COL_H_DEPUTIES = 5, 6, 7
 COL_I_CVC_TIER, COL_J_CVC_WINS, COL_K_SIEGE_TIER, COL_L_SIEGE_WINS = 8, 9, 10, 11
-COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14                # M/N/O
-COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20  # P–U
-IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27                  # V–AB
-IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30                               # AC/AD/AE
+COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14  # ranges text (not filters)
+
+# Filters P–U
+COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
+
+# Entry Criteria V–AB
+IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
+
+# AC / AD / AE add-ons
+IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
 
 # ------------------- Helpers -------------------
 def norm(s: str) -> str:
     return (s or "").strip().upper()
 
 def is_header_row(row) -> bool:
+    """Detect and ignore header/label rows that look like CLAN/TAG/Spots."""
     b = norm(row[COL_B_CLAN]) if len(row) > COL_B_CLAN else ""
     c = norm(row[COL_C_TAG])  if len(row) > COL_C_TAG  else ""
     e = norm(row[COL_E_SPOTS]) if len(row) > COL_E_SPOTS else ""
@@ -107,12 +118,12 @@ def cell_has_diff(cell_text: str, token: str | None) -> bool:
         return True
     t = map_token(token)
     c = norm(cell_text)
-    return (t in c or (t=="HRD" and "HARD" in c) or (t=="NML" and "NORMAL" in c) or (t=="BTL" and "BRUTAL" in c))
+    return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
 
 def cell_equals_10(cell_text: str, expected: str | None) -> bool:
     if expected is None:
         return True
-    return (cell_text or "").strip() == expected
+    return (cell_text or "").strip() == expected  # exact 1/0
 
 def playstyle_ok(cell_text: str, value: str | None) -> bool:
     if not value:
@@ -124,9 +135,12 @@ def parse_spots_num(cell_text: str) -> int:
     return int(m.group()) if m else 0
 
 def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
-    if len(row) <= IDX_AB: return False
-    if is_header_row(row): return False
-    if not (row[COL_B_CLAN] or "").strip(): return False
+    if len(row) <= IDX_AB:
+        return False
+    if is_header_row(row):
+        return False
+    if not (row[COL_B_CLAN] or "").strip():
+        return False
     return (
         cell_has_diff(row[COL_P_CB], cb) and
         cell_has_diff(row[COL_Q_HYDRA], hydra) and
@@ -136,54 +150,48 @@ def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
         playstyle_ok(row[COL_U_STYLE], playstyle)
     )
 
-# ---- robust delete helper (scheduled) ----
-def schedule_delete(msg: discord.Message | None, delay: float = 0.0):
-    async def _do_delete(m: discord.Message | None, d: float):
-        if not m: return
-        try:
-            if d: await asyncio.sleep(d)
-            await m.delete()
-        except Exception:
-            pass
-    try:
-        asyncio.create_task(_do_delete(msg, delay))
-    except RuntimeError:
-        pass
-
-# ---- emoji helpers ----
 def emoji_for_tag(guild: discord.Guild | None, tag: str | None):
-    """Return emoji by name; case-insensitive fallback."""
+    """Return the Discord emoji object for tag (or None)."""
     if not guild or not tag:
         return None
-    name = tag.strip()
-    em = get(guild.emojis, name=name)
-    if em:
-        return em
-    lower = name.lower()
-    for e in guild.emojis:
-        try:
-            if e.name.lower() == lower:
-                return e
-        except Exception:
-            continue
-    return None
+    return get(guild.emojis, name=tag.strip())
 
-def padded_emoji_url(guild: discord.Guild | None, tag: str | None,
-                     size: int | None = None, box: float | None = None) -> str | None:
-    """URL to /emoji-pad proxy (square canvas, trimmed + padded)."""
-    if not guild or not tag or not BASE_URL:
+# ----- padded emoji URL helper (proxy only) -----
+def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | None = None, box: float | None = None) -> str | None:
+    """
+    Build a URL to our /emoji-pad proxy that fetches the discord emoji, trims transparent
+    borders, pads into a square with consistent margins, and returns a PNG.
+    """
+    if not guild or not tag:
         return None
     emj = emoji_for_tag(guild, tag)
     if not emj:
         return None
+    src  = str(emj.url)
+    base = BASE_URL
+    if not base:
+        return None
     size = size or EMOJI_PAD_SIZE
     box  = box  or EMOJI_PAD_BOX
-    src  = str(emj.url)
     q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box), "v": str(emj.id)})
-    return f"{BASE_URL.rstrip('/')}/emoji-pad?{q}"
+    return f"{base.rstrip('/')}/emoji-pad?{q}"
+
+# ------------------- Panel copy helpers -------------------
+def panel_intro(spawn_cmd: str, owner_mention: str, private: bool = False) -> str:
+    """
+    spawn_cmd: "match" for !clanmatch panels, "search" for !clansearch panels
+    """
+    lines = [f"**{owner_mention} has summoned C1C-Matchmaker.**"]
+    if private:
+        lines.append("🔒 This panel is **private** — only you can see and use it.")
+    else:
+        cmd = "!clansearch" if spawn_cmd == "search" else "!clanmatch"
+        lines.append(f"⚠️ Only they can use this panel. Not yours? Type **{cmd}** to get your own.")
+    return "\n".join(lines)
 
 # ------------------- Formatting -------------------
 def build_entry_criteria_classic(row) -> str:
+    """For !clanmatch output: inner labels not bold; spacing via NBSP pipes."""
     NBSP_PIPE = "\u00A0|\u00A0"
     parts = []
     v  = (row[IDX_V]  or "").strip()
@@ -214,15 +222,6 @@ def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode
     parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
 
-def _set_thumb_with_padding(embed: discord.Embed, guild: discord.Guild | None, tag: str | None):
-    url = padded_emoji_url(guild, tag)
-    if url:
-        embed.set_thumbnail(url=url)
-    elif not STRICT_EMOJI_PROXY:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            embed.set_thumbnail(url=str(em.url))
-
 def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
@@ -242,7 +241,15 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
         sections.append(f"**Clan Needs/Comments:** {comments}")
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
-    _set_thumb_with_padding(e, guild, tag)
+
+    thumb = padded_emoji_url(guild, tag)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
@@ -263,7 +270,8 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
 
     lines = ["**Entry Criteria:**"]
-    if z: lines.append(f"Clan Boss: {z}")
+    if z:
+        lines.append(f"Clan Boss: {z}")
     if v or x:
         hx = []
         if v: hx.append(f"{v} keys")
@@ -275,73 +283,66 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
         if y: cy.append(y)
         lines.append("Chimera: " + " — ".join(cy))
     if aa or ab:
-        bits = []
-        if aa: bits.append(f"non PR minimum: {aa}")
-        if ab: bits.append(f"PR minimum: {ab}")
-        lines.append("CvC: " + " | ".join(bits))
+        cvc_bits = []
+        if aa: cvc_bits.append(f"non PR minimum: {aa}")
+        if ab: cvc_bits.append(f"PR minimum: {ab}")
+        lines.append("CvC: " + " | ".join(cvc_bits))
     if len(lines) == 1:
         lines.append("—")
 
     e = discord.Embed(title=title, description="\n".join(lines))
-    _set_thumb_with_padding(e, guild, c)
+
+    thumb = padded_emoji_url(guild, c)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, c)
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
+
+# ------------------- Reaction flip registry -------------------
+REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel_id, filters}
 
 # ------------------- Discord bot -------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
-ACTIVE_PANELS: dict[tuple[int, str], int] = {}
+ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
 COOLDOWN_SEC = 2.0
-
-# Generic reaction index:
-# message_id -> {"row": row, "kind": "entry_from_profile" | "profile_from_search",
-#                "guild_id": int, "channel_id": int, "filters": str}
-REACT_INDEX: dict[int, dict] = {}
 
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
-def build_panel_intro_embed(user: discord.abc.User, variant: str, private: bool) -> discord.Embed:
-    top = f"**{user.mention} has summoned C1C-Matchmaker**\n\n"
-    if variant == "search":
-        title = "Search for a C1C Clan" + (" (Private)" if private else "")
-        desc = top + "Pick any filters *(you can leave some blank)* and click **Search Clans** to see Entry Criteria and open Spots."
-    else:
-        title = "Find a C1C Clan" + (" (Private)" if private else " for your recruit")
-        desc = (top +
-                "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
-                "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
-                "Too many filters might narrow things down to zero.")
-    return discord.Embed(title=title, description=desc)
-
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Roster, Reset, Search)."""
-    def __init__(self, author_id: int, embed_variant: str = "classic", ephemeral_mode: bool = False):
-        super().__init__(timeout=1800)
+    def __init__(self, author_id: int, embed_variant: str = "classic", spawn_cmd: str = "match"):
+        super().__init__(timeout=1800)  # 30 min
         self.author_id = author_id
-        self.embed_variant = embed_variant
+        self.embed_variant = embed_variant        # "classic" or "search"
+        self.spawn_cmd = spawn_cmd                # "match" or "search"
+        self.owner_mention: str | None = None
+
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
-        self.roster_mode: str | None = None
-        self.message: discord.Message | None = None
-        self.ephemeral_mode = ephemeral_mode
+        self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
+        self.message: discord.Message | None = None  # set after sending
 
     async def on_timeout(self):
-        if self.ephemeral_mode:
-            return
         for child in self.children:
             child.disabled = True
         try:
             if self.message:
+                cmd = "!clansearch" if self.spawn_cmd == "search" else "!clanmatch"
                 expired = discord.Embed(
                     title="Find a C1C Clan",
-                    description="⏳ Panel expired. Run `!clanmatch` or `!clansearch` to open a fresh one."
+                    description=f"⏳ This panel expired. Type **{cmd}** to open a fresh one."
                 )
                 await self.message.edit(embed=expired, view=self)
         except Exception as e:
@@ -376,13 +377,19 @@ class ClanMatchView(discord.ui.View):
                     elif self.roster_mode == "open":
                         child.label = "Roster: Open only"
                         child.style = discord.ButtonStyle.success
-                    else:
+                    else:  # 'full'
                         child.label = "Roster: Full only"
                         child.style = discord.ButtonStyle.primary
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
-            await itx.response.send_message("This panel isn’t yours—run the command to get your own. 🙂", ephemeral=True)
+            cmd = "!clansearch" if self.spawn_cmd == "search" else "!clanmatch"
+            owner = self.owner_mention or "the summoner"
+            note = f"⚠️ You can’t use {owner}’s panel. Type **{cmd}** to get your own."
+            try:
+                await itx.response.send_message(note, ephemeral=True)
+            except InteractionResponded:
+                await itx.followup.send(note, ephemeral=True)
             return False
         return True
 
@@ -391,25 +398,37 @@ class ClanMatchView(discord.ui.View):
                        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.cb = select.values[0] if select.values else None
-        await itx.response.defer()
+        self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
+        except InteractionResponded:
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
                        options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
     async def hydra_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.hydra = select.values[0] if select.values else None
-        await itx.response.defer()
+        self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
+        except InteractionResponded:
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
                        options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
     async def chimera_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.chimera = select.values[0] if select.values else None
-        await itx.response.defer()
+        self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
+        except InteractionResponded:
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
                        options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
     async def playstyle_select(self, itx: discord.Interaction, select: discord.ui.Select):
         self.playstyle = select.values[0] if select.values else None
-        await itx.response.defer()
+        self._sync_visuals()
+        try:    await itx.response.edit_message(view=self)
+        except InteractionResponded:
+                await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
     # Row 4: buttons
     def _cycle(self, current):
@@ -434,9 +453,13 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
-        if self.roster_mode is None:      self.roster_mode = "open"
-        elif self.roster_mode == "open":  self.roster_mode = "full"
-        else:                             self.roster_mode = None
+        # Cycle: None -> 'open' -> 'full' -> None
+        if self.roster_mode is None:
+            self.roster_mode = "open"
+        elif self.roster_mode == "open":
+            self.roster_mode = "full"
+        else:
+            self.roster_mode = None
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
@@ -455,145 +478,125 @@ class ClanMatchView(discord.ui.View):
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
-            await itx.response.send_message("Pick at least **one** filter, then try again. 🙂",
-                                            ephemeral=self.ephemeral_mode)
+            await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
             return
 
-        await itx.response.defer(thinking=True)
+        await itx.response.defer(thinking=True)  # public results
         try:
             rows = get_rows(False)
         except Exception as e:
-            await itx.followup.send(f"❌ Failed to read sheet: {e}", ephemeral=self.ephemeral_mode)
+            await itx.followup.send(f"❌ Failed to read sheet: {e}")
             return
 
         matches = []
         for row in rows[1:]:
             try:
-                if is_header_row(row): continue
+                if is_header_row(row):
+                    continue
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     spots_num = parse_spots_num(row[COL_E_SPOTS])
-                    if self.roster_mode == "open" and spots_num <= 0: continue
-                    if self.roster_mode == "full" and spots_num > 0:  continue
+                    if self.roster_mode == "open" and spots_num <= 0:
+                        continue
+                    if self.roster_mode == "full" and spots_num > 0:
+                        continue
                     matches.append(row)
             except Exception:
                 continue
 
         if not matches:
-            await itx.followup.send("No matching clans found. Try a different combo.",
-                                    ephemeral=self.ephemeral_mode)
+            await itx.followup.send("No matching clans found. Try a different combo.")
             return
 
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege,
-                                             self.playstyle, self.roster_mode)
+        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
+        builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
-        # If we're in "search" variant, send ONE embed per message so 💡 maps 1:1 to a clan.
-        if self.embed_variant == "search":
-            for r in matches:
-                embed = make_embed_for_row_search(r, filters_text, itx.guild)
-                # Append hint about the bulb
-                footer = embed.footer.text or ""
+        # Send one message per row so 💡 can map 1:1
+        for r in matches:
+            embed = builder(r, filters_text, itx.guild)
+
+            # If it's a search-style card, let 💡 flip to profile
+            if self.embed_variant == "search":
+                ft = embed.footer.text or ""
                 hint = "React with 💡 for Clan Profile"
-                embed.set_footer(text=(f"{footer} • {hint}" if footer else hint))
-                msg = await itx.followup.send(embed=embed, ephemeral=self.ephemeral_mode)
-                if not self.ephemeral_mode:
-                    # index the reaction → show profile
-                    try: await msg.add_reaction("💡")
-                    except Exception: pass
-                    REACT_INDEX[msg.id] = {
-                        "row": r, "kind": "profile_from_search",
-                        "guild_id": itx.guild.id if itx.guild else None,
-                        "channel_id": msg.channel.id,
-                        "filters": filters_text,
-                    }
-        else:
-            # Classic results: keep chunking
-            builder = make_embed_for_row_classic
-            for i in range(0, len(matches), 10):
-                chunk = matches[i:i+10]
-                embeds = [builder(r, filters_text, itx.guild) for r in chunk]
-                await itx.followup.send(embeds=embeds, ephemeral=self.ephemeral_mode)
+                embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
 
-# ---- private-first launcher for !clanmatch ----
-class PanelLauncherView(discord.ui.View):
-    def __init__(self, author_id: int, embed_variant: str, command_message_id: int):
-        super().__init__(timeout=300)
-        self.author_id = author_id
-        self.embed_variant = embed_variant
-        self.command_message_id = command_message_id
+            msg = await itx.followup.send(embed=embed)
+            # Add reaction + register when search variant (so flip works)
+            if self.embed_variant == "search":
+                try: await msg.add_reaction("💡")
+                except Exception: pass
+                REACT_INDEX[msg.id] = {
+                    "row": r,
+                    "kind": "profile_from_search",
+                    "guild_id": itx.guild_id,
+                    "channel_id": msg.channel.id,
+                    "filters": filters_text,
+                }
 
-    async def interaction_check(self, itx: discord.Interaction) -> bool:
-        if itx.user.id != self.author_id:
-            await itx.response.send_message("This launcher is for someone else. Run `!clanmatch` to get your own. 🙂",
-                                            ephemeral=True)
-            return False
-        return True
+# ------------------- Commands: panels -------------------
+async def _safe_delete(message: discord.Message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
-    @discord.ui.button(label="Open Private Panel", style=discord.ButtonStyle.primary, row=0, custom_id="launch_private")
-    async def open_private(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        view = ClanMatchView(itx.user.id, self.embed_variant, ephemeral_mode=True)
-        view._sync_visuals()
-        embed = build_panel_intro_embed(itx.user, "classic", private=True)
-        await itx.response.send_message(embed=embed, view=view, ephemeral=True)
-
-        schedule_delete(itx.message, 0.1)
-        try:
-            cmd_msg = await itx.channel.fetch_message(self.command_message_id)
-            schedule_delete(cmd_msg, 0.1)
-        except Exception:
-            pass
-
-    @discord.ui.button(label="Post Public Panel", style=discord.ButtonStyle.secondary, row=0, custom_id="launch_public")
-    async def open_public(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        view = ClanMatchView(itx.user.id, self.embed_variant, ephemeral_mode=False)
-        view._sync_visuals()
-        embed = build_panel_intro_embed(itx.user, "classic", private=False)
-        try:
-            await itx.response.edit_message(embed=embed, view=view)
-            view.message = itx.message
-        except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, embed=embed, view=view)
-            view.message = itx.message
-
-# ------------------- Commands -------------------
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context):
     now = time.time()
-    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC: return
+    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
+        return
     LAST_CALL[ctx.author.id] = now
 
-    launch = PanelLauncherView(ctx.author.id, "classic", ctx.message.id)
-    launcher_embed = discord.Embed(
-        title="Start Clan Matching (Private-first)",
-        description=("Click **Open Private Panel** to work silently (only you can see it), or "
-                     "**Post Public Panel** if you want the whole thread to follow along.")
-    )
+    view = ClanMatchView(author_id=ctx.author.id, embed_variant="classic", spawn_cmd="match")
+    view.owner_mention = ctx.author.mention
+    view._sync_visuals()
 
-    key = (ctx.author.id, "classic_launch")
+    embed = discord.Embed(
+        title="Find a C1C Clan for your recruit",
+        description=panel_intro("match", ctx.author.mention, private=False) + "\n\n"
+                    "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
+                    "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
+                    "Too many filters might narrow things down to zero."
+    )
+    embed.set_footer(text="Only the summoner can use this panel.")
+
+    key = (ctx.author.id, "classic")
     old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
             msg = await ctx.channel.fetch_message(old_id)
-            await msg.edit(embed=launcher_embed, view=launch)
-            schedule_delete(ctx.message, 0.1)
+            view.message = msg
+            await msg.edit(embed=embed, view=view)
+            await _safe_delete(ctx.message)
             return
         except Exception:
             pass
 
-    sent = await ctx.reply(embed=launcher_embed, view=launch, mention_author=False)
+    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
+    view.message = sent
     ACTIVE_PANELS[key] = sent.id
-    schedule_delete(ctx.message, 0.1)
+    await _safe_delete(ctx.message)
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context):
     now = time.time()
-    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC: return
+    if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
+        return
     LAST_CALL[ctx.author.id] = now
 
-    view = ClanMatchView(ctx.author.id, embed_variant="search", ephemeral_mode=False)
+    view = ClanMatchView(author_id=ctx.author.id, embed_variant="search", spawn_cmd="search")
+    view.owner_mention = ctx.author.mention
     view._sync_visuals()
-    embed = build_panel_intro_embed(ctx.author, "search", private=False)
+
+    embed = discord.Embed(
+        title="Search for a C1C Clan",
+        description=panel_intro("search", ctx.author.mention, private=False) + "\n\n"
+                    "Pick any filters *(you can leave some blank)* and click **Search Clans** "
+                    "to see Entry Criteria and open Spots."
+    )
+    embed.set_footer(text="Only the summoner can use this panel.")
 
     key = (ctx.author.id, "search")
     old_id = ACTIVE_PANELS.get(key)
@@ -602,7 +605,7 @@ async def clansearch_cmd(ctx: commands.Context):
             msg = await ctx.channel.fetch_message(old_id)
             view.message = msg
             await msg.edit(embed=embed, view=view)
-            schedule_delete(ctx.message, 0.1)
+            await _safe_delete(ctx.message)
             return
         except Exception:
             pass
@@ -610,49 +613,60 @@ async def clansearch_cmd(ctx: commands.Context):
     sent = await ctx.reply(embed=embed, view=view, mention_author=False)
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
-    schedule_delete(ctx.message, 0.1)
+    await _safe_delete(ctx.message)
 
-# ------------------- Clan profile command (+ 💡 reaction to show Entry Criteria) -------------------
+# ------------------- Clan profile command -------------------
 def find_clan_row(query: str):
-    if not query: return None
+    if not query:
+        return None
     q = query.strip().upper()
     rows = get_rows(False)
     exact_tag = None
     exact_name = None
     partials = []
     for row in rows[1:]:
-        if is_header_row(row): continue
+        if is_header_row(row):
+            continue
         name = (row[COL_B_CLAN] or "").strip()
         tag  = (row[COL_C_TAG]  or "").strip()
-        if not name and not tag: continue
+        if not name and not tag:
+            continue
         nU, tU = (name.upper(), tag.upper())
-        if q == tU: exact_tag = row; break
-        if q == nU and exact_name is None: exact_name = row
-        if q in tU or q in nU: partials.append(row)
+        if q == tU:
+            exact_tag = row; break
+        if q == nU and exact_name is None:
+            exact_name = row
+        if q in tU or q in nU:
+            partials.append(row)
     return exact_tag or exact_name or (partials[0] if partials else None)
 
 def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
+    # Top line with rank fallback
     rank_raw = (row[COL_A_RANK] or "").strip()
     rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
 
-    name  = (row[COL_B_CLAN] or "").strip()
-    tag   = (row[COL_C_TAG]  or "").strip()
-    lvl   = (row[COL_D_LEVEL] or "").strip()
+    name  = (row[COL_B_CLAN]        or "").strip()
+    tag   = (row[COL_C_TAG]         or "").strip()
+    lvl   = (row[COL_D_LEVEL]       or "").strip()
 
-    lead  = (row[COL_G_LEAD] or "").strip()
-    deps  = (row[COL_H_DEPUTIES] or "").strip()
+    # Leadership
+    lead  = (row[COL_G_LEAD]        or "").strip()
+    deps  = (row[COL_H_DEPUTIES]    or "").strip()
 
-    cb    = (row[COL_M_CB] or "").strip()
-    hydra = (row[COL_N_HYDRA] or "").strip()
-    chim  = (row[COL_O_CHIMERA] or "").strip()
+    # Ranges
+    cb    = (row[COL_M_CB]          or "").strip()
+    hydra = (row[COL_N_HYDRA]       or "").strip()
+    chim  = (row[COL_O_CHIMERA]     or "").strip()
 
-    cvc_t = (row[COL_I_CVC_TIER] or "").strip()
-    cvc_w = (row[COL_J_CVC_WINS] or "").strip()
-    sg_t  = (row[COL_K_SIEGE_TIER] or "").strip()
-    sg_w  = (row[COL_L_SIEGE_WINS] or "").strip()
+    # CvC / Siege
+    cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
+    cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
+    sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
+    sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
 
+    # Footer
     prog  = (row[COL_F_PROGRESSION] or "").strip()
-    style = (row[COL_U_STYLE] or "").strip()
+    style = (row[COL_U_STYLE]       or "").strip()
 
     title = f"{name} | {tag} | **Level** {lvl} | **Global Rank** {rank}"
 
@@ -669,10 +683,20 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
         "",
     ]
     tail = " | ".join([p for p in [prog, style] if p])
-    if tail: lines.append(tail)
+    if tail:
+        lines.append(tail)
 
     e = discord.Embed(title=title, description="\n".join(lines))
-    _set_thumb_with_padding(e, guild, tag)
+
+    thumb = padded_emoji_url(guild, tag)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
+    # Add hint so 💡 can flip to Entry Criteria
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
@@ -680,28 +704,28 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
     if not query:
         await ctx.reply("Usage: `!clan <tag or name>` — e.g., `!clan C1CE` or `!clan Elders`", mention_author=False)
-        schedule_delete(ctx.message, 0.1); return
+        return
     try:
         row = find_clan_row(query)
         if not row:
             await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
-            schedule_delete(ctx.message, 0.1); return
-
+            return
         embed = make_embed_for_profile(row, ctx.guild)
         msg = await ctx.reply(embed=embed, mention_author=False)
-
         try: await msg.add_reaction("💡")
         except Exception: pass
         REACT_INDEX[msg.id] = {
-            "row": row, "kind": "entry_from_profile",
+            "row": row,
+            "kind": "entry_from_profile",
             "guild_id": ctx.guild.id if ctx.guild else None,
             "channel_id": msg.channel.id,
-            "filters": "Profile"
+            "filters": "",
         }
-    finally:
-        schedule_delete(ctx.message, 0.1)
+        await _safe_delete(ctx.message)
+    except Exception as e:
+        await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
 
-# ------------------- Reaction handler -------------------
+# ------------------- Reaction flip: 💡 -------------------
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
@@ -723,7 +747,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if info["kind"] == "entry_from_profile":
             # Show Entry Criteria from a profile card
             embed = make_embed_for_row_search(row, info.get("filters", ""), guild)
-            # add hint to flip back to profile
             ft = embed.footer.text or ""
             hint = "React with 💡 for Clan Profile"
             embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
@@ -742,7 +765,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
         else:  # "profile_from_search" → show Profile from an entry-criteria card
             embed = make_embed_for_profile(row, guild)
-            # (make_embed_for_profile already sets footer hint for Entry Criteria)
             sent = await channel.send(embed=embed, reference=src_msg)
             try: await sent.add_reaction("💡")
             except Exception: pass
@@ -758,38 +780,39 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except Exception as e:
         print("[react] error:", e)
 
-
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("✅ I’m alive and listening, captain!")
-    schedule_delete(ctx.message, 0.1)
 
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
     try:
         try:
-            ws = get_ws(False); _ = ws.row_values(1)
+            ws = get_ws(False)
+            _ = ws.row_values(1)
             sheets_status = f"OK (`{WORKSHEET_NAME}`)"
         except Exception as e:
             sheets_status = f"ERROR: {type(e).__name__}"
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
         await ctx.reply(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}",
                         mention_author=False)
-    finally:
-        schedule_delete(ctx.message, 0.1)
+        await _safe_delete(ctx.message)
+    except Exception as e:
+        await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
 
 @bot.command(name="reload")
 async def reload_cache_cmd(ctx):
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
-    schedule_delete(ctx.message, 0.1)
+    await _safe_delete(ctx.message)
 
 @bot.tree.command(name="health", description="Bot & Sheets status")
 async def health_slash(itx: discord.Interaction):
     await itx.response.defer(thinking=False, ephemeral=False)
     try:
-        ws = get_ws(False); _ = ws.row_values(1)
+        ws = get_ws(False)
+        _ = ws.row_values(1)
         sheets_status = f"OK (`{WORKSHEET_NAME}`)"
     except Exception as e:
         sheets_status = f"ERROR: {e.__class__.__name__}"
@@ -827,13 +850,13 @@ async def emoji_pad_handler(request: web.Request):
 
         img = Image.open(io.BytesIO(raw)).convert("RGBA")
 
-        # Trim transparent borders
+        # Trim transparent borders so glyph is truly centered
         alpha = img.split()[-1]
         bbox = alpha.getbbox()
         if bbox:
             img = img.crop(bbox)
 
-        # Scale glyph to fit target box
+        # Scale glyph to fit target “box” inside the square canvas
         w, h = img.size
         max_side = max(w, h)
         target   = max(1, int(size * box))
@@ -842,7 +865,6 @@ async def emoji_pad_handler(request: web.Request):
         new_h    = max(1, int(h * scale))
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
-        # Center on square canvas
         canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         x = (size - new_w) // 2
         y = (size - new_h) // 2
@@ -887,4 +909,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
