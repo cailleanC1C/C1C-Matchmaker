@@ -542,7 +542,18 @@ async def _safe_delete(message: discord.Message):
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
-async def clanmatch_cmd(ctx: commands.Context):
+async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
+    # Guard: this command takes no arguments
+    if extra and extra.strip():
+        msg = (
+            "❌ `!clanmatch` doesn’t take a clan tag or name.\n"
+            "• Use **`!clan <tag or name>`** to see a specific clan profile (e.g., `!clan C1CE`).\n"
+            "• Or type **`!clanmatch`** by itself to open the filter panel."
+        )
+        await ctx.reply(msg, mention_author=False)
+        await _safe_delete(ctx.message)
+        return
+
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -578,9 +589,21 @@ async def clanmatch_cmd(ctx: commands.Context):
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
 
+
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
-async def clansearch_cmd(ctx: commands.Context):
+async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
+    # Guard: this command takes no arguments
+    if extra and extra.strip():
+        msg = (
+            "❌ `!clansearch` doesn’t take a clan tag or name.\n"
+            "• Use **`!clan <tag or name>`** to see a specific clan profile (e.g., `!clan C1CE`).\n"
+            "• Or type **`!clansearch`** by itself to open the filter panel."
+        )
+        await ctx.reply(msg, mention_author=False)
+        await _safe_delete(ctx.message)
+        return
+
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -909,3 +932,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
