@@ -55,19 +55,21 @@ async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target
     name = getattr(obj, "name", "unknown")
     return f"{mention} — **{name}** `{target_id}`"
 
-# Sheets client (unified)
+# Sheets client (unified, modern google-auth)
 def gs_client():
     import gspread as _gspread
     from google.oauth2.service_account import Credentials as _Creds
     raw = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("SERVICE_ACCOUNT_JSON"))
-    if not raw: raise RuntimeError("Set GOOGLE_SERVICE_ACCOUNT_JSON env var (or SERVICE_ACCOUNT_JSON).")
+    if not raw:
+        raise RuntimeError("Set GOOGLE_SERVICE_ACCOUNT_JSON (or SERVICE_ACCOUNT_JSON).")
     info = json.loads(raw)
     creds = _Creds.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return _gs_client()
+    return _gspread.authorize(creds)
 
 def open_sheet_by_env():
     sid = (os.getenv("GSHEET_ID") or os.getenv("GOOGLE_SHEET_ID") or os.getenv("CONFIG_SHEET_ID"))
-    if not sid: raise RuntimeError("Set GSHEET_ID (or GOOGLE_SHEET_ID / CONFIG_SHEET_ID).")
+    if not sid:
+        raise RuntimeError("Set GSHEET_ID (or GOOGLE_SHEET_ID / CONFIG_SHEET_ID).")
     return gs_client().open_by_key(sid)
 # ============================================================================
 
