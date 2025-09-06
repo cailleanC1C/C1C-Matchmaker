@@ -657,6 +657,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     await _safe_delete(ctx.message)
 
 
+
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
@@ -704,6 +705,17 @@ async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
+
+@bot.command(name="cmchecksheet")
+async def cmchecksheet(ctx):
+    try:
+        sh = open_sheet_by_env()  # uses GSHEET_ID (or fallbacks)
+        ws = sh.worksheet("CONFIG")
+        rows = len(ws.get_all_values()) - 1
+        await ctx.reply(f"✅ Sheet OK (Matchmaker). CONFIG rows: **{rows}**")
+    except Exception as e:
+        await ctx.reply(f"❌ Matchmaker sheet check failed: `{type(e).__name__}: {e}`")
+
 
 # ------------------- Clan profile command -------------------
 def find_clan_row(query: str):
