@@ -1,16 +1,18 @@
 # bot_clanmatch_prefix.py
-# C1C-Matchmaker — unified result posting, Reset deletion, wipe-on-expire, and reload-on-expire
-# Requires: discord.py v2.x
+# C1C-Matchmaker — hybrid fixed/per-recruiter thread routing, mobile-friendly pointer,
+# single-message results, wipe-on-expire/reset/close, reload-on-expire, and Render web binding.
+# Requires: discord.py v2.x, aiohttp
 
 import os
 import json
 import asyncio
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence
 
 import discord
 from discord.ext import commands
 from discord.ui import View, button, Button, Modal, TextInput
+from aiohttp import web
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -20,12 +22,22 @@ log = logging.getLogger("matchmaker")
 TOKEN = os.environ.get("DISCORD_TOKEN")  # required
 PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))  # default 10 min
 
-# Optional: Google Sheet search (fallbacks to demo data if not configured)
-GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")  # JSON string (service account)
-GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")          # sheet id that holds clan data
-CLANS_WORKSHEET_NAME = os.environ.get("CLANS_WORKSHEET_NAME", "Clans")
+# Thread routing (DEFAULT: hybrid)
+PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "hybrid").lower()  # fixed | per_recruiter | hybrid
+PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))  # required for fixed/hybrid
+PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0"))  # needed for per_recruiter/hybrid
+PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "1440"))  # 60, 1440, 4320, 10080
+PANEL_PER_RECRUITER_ROLES = os.environ.get("PANEL_PER_RECRUITER_ROLES", "").strip()
+PANEL_BOUNCE_DELETE_SECONDS = int(os.environ.get("PANEL_BOUNCE_DELETE_SECONDS", "600"))  # pointer + command lifetime
 
+# Google Sheets (optional; demo data fallback if not set)
+GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+CLANS_WORKSHEET_NAME = os.environ.get("CLANS_WORKSHEET_NAME", "Clans")
 USE_GSHEETS = bool(GSPREAD_CREDENTIALS and GOOGLE_SHEET_ID)
+
+# Render web server port
+WEB_PORT = int(os.environ.get("PORT", "10000"))
 
 # ---------- Discord Setup ----------
 intents = discord.Intents.default()
@@ -37,7 +49,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================
 
 def _fallback_demo_data() -> List[Dict]:
-    """Used if Google Sheets is not configured; safe demo."""
     return [
         {"Name": "Martyrs", "Tag": "MTR", "Focus": "Siege & Clash wins", "Vibe": "Piratey, fun-first, no shame tags"},
         {"Name": "Vagrants", "Tag": "VAG", "Focus": "Clash grinders", "Vibe": "Chill daily hitters"},
@@ -57,23 +68,14 @@ def _match_row(row: Dict[str, str], query: str) -> bool:
     return False
 
 def fetch_clans(query: str) -> List[Dict]:
-    """
-    Return a list of rows (dicts) representing clans matching 'query'.
-    If Google Sheets is configured, attempts to read all rows from the named worksheet
-    and does a simple substring match across columns.
-    Otherwise falls back to demo data.
-    """
     query = _normalize(query)
     if not query:
-        query = ""  # empty means "show many"
+        query = ""
 
     if not USE_GSHEETS:
         rows = _fallback_demo_data()
-        if not query:
-            return rows
-        return [r for r in rows if _match_row(r, query)]
+        return rows if not query else [r for r in rows if _match_row(r, query)]
 
-    # ---- Google Sheets path ----
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -86,15 +88,136 @@ def fetch_clans(query: str) -> List[Dict]:
         client = gspread.authorize(creds)
         ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(CLANS_WORKSHEET_NAME)
         all_values = ws.get_all_records()
-        if not query:
-            return all_values
-        return [r for r in all_values if _match_row(r, query)]
+        return all_values if not query else [r for r in all_values if _match_row(r, query)]
     except Exception as e:
-        log.exception("Failed to read from Google Sheets; falling back to demo data: %s", e)
+        log.exception("Sheets read failed; using demo data: %s", e)
         rows = _fallback_demo_data()
-        if not query:
-            return rows
-        return [r for r in rows if _match_row(r, query)]
+        return rows if not query else [r for r in rows if _match_row(r, query)]
+
+# ============================================================
+#               THREAD RESOLUTION (FIXED/HYBRID/PR)
+# ============================================================
+
+def _parse_role_ids(csv: str) -> Sequence[int]:
+    out = []
+    for part in csv.split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+PER_RECRUITER_ROLE_IDS = tuple(_parse_role_ids(PANEL_PER_RECRUITER_ROLES))
+
+async def _unarchive_if_needed(thread: discord.Thread) -> discord.Thread:
+    try:
+        if thread.archived:
+            await thread.edit(archived=False, auto_archive_duration=PANEL_THREAD_ARCHIVE_MIN)
+    except Exception as e:
+        log.warning("Could not unarchive thread %s: %s", getattr(thread, "id", "?"), e)
+    return thread
+
+async def _find_archived_thread_by_name(channel: discord.TextChannel, name: str) -> Optional[discord.Thread]:
+    try:
+        async for t in channel.archived_threads(limit=200, private=False):
+            if t.name == name:
+                return t
+    except Exception as e:
+        log.debug("archived_threads fetch failed: %s", e)
+    return None
+
+async def _get_fixed_thread(_: commands.Context) -> Optional[discord.Thread]:
+    if not PANEL_FIXED_THREAD_ID:
+        return None
+    ch = bot.get_channel(PANEL_FIXED_THREAD_ID)
+    if isinstance(ch, discord.Thread):
+        return await _unarchive_if_needed(ch)
+    try:
+        fetched = await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
+        if isinstance(fetched, discord.Thread):
+            return await _unarchive_if_needed(fetched)
+    except Exception as e:
+        log.warning("Fixed thread fetch failed (%s): %s", PANEL_FIXED_THREAD_ID, e)
+    return None
+
+async def _get_or_create_recruiter_thread(ctx: commands.Context) -> Optional[discord.Thread]:
+    if not PANEL_PARENT_CHANNEL_ID:
+        return None
+    parent = bot.get_channel(PANEL_PARENT_CHANNEL_ID)
+    if not isinstance(parent, discord.TextChannel):
+        try:
+            parent = await bot.fetch_channel(PANEL_PARENT_CHANNEL_ID)
+        except Exception as e:
+            log.warning("Parent channel fetch failed: %s", e)
+            return None
+
+    # Add user ID for uniqueness + stability
+    name = f"Matchmaker — {ctx.author.display_name} · {ctx.author.id}"
+
+    # 1) active list
+    for t in parent.threads:
+        if t.name == name:
+            return await _unarchive_if_needed(t)
+
+    # 2) archived
+    t = await _find_archived_thread_by_name(parent, name)
+    if t:
+        return await _unarchive_if_needed(t)
+
+    # 3) create new
+    try:
+        new_t = await parent.create_thread(
+            name=name,
+            type=discord.ChannelType.public_thread,
+            auto_archive_duration=PANEL_THREAD_ARCHIVE_MIN
+        )
+        return new_t
+    except Exception as e:
+        log.warning("Recruiter thread create failed in %s: %s", parent.id, e)
+        return None
+
+def _user_is_recruiter(ctx: commands.Context) -> bool:
+    if not PER_RECRUITER_ROLE_IDS or not isinstance(ctx.author, discord.Member):
+        return False
+    user_roles = {r.id for r in ctx.author.roles}
+    return any(rid in user_roles for rid in PER_RECRUITER_ROLE_IDS)
+
+async def _resolve_target_thread(ctx: commands.Context) -> Optional[discord.Thread]:
+    mode = PANEL_THREAD_MODE
+    if mode == "fixed":
+        return await _get_fixed_thread(ctx)
+    if mode == "per_recruiter":
+        return await _get_or_create_recruiter_thread(ctx)
+    if mode == "hybrid":
+        if _user_is_recruiter(ctx):
+            t = await _get_or_create_recruiter_thread(ctx)
+            if t:
+                return t
+        return await _get_fixed_thread(ctx)
+    return await _get_fixed_thread(ctx)
+
+async def _post_pointer_and_schedule_cleanup(ctx: commands.Context, thread: discord.Thread):
+    """Reply in invoking channel with a pointer to the thread, then auto-delete it and the command."""
+    try:
+        bounce = await ctx.reply(
+            f"📎 Summoned matchmaking panel here → {thread.mention}\n"
+            f"_This notice (and your command) will self-delete in {PANEL_BOUNCE_DELETE_SECONDS//60} min._",
+            mention_author=True
+        )
+    except Exception:
+        bounce = None
+
+    async def _del_later(msg: Optional[discord.Message]):
+        if not msg:
+            return
+        try:
+            await asyncio.sleep(PANEL_BOUNCE_DELETE_SECONDS)
+            await msg.delete()
+        except Exception:
+            pass
+
+    # schedule deletions
+    asyncio.create_task(_del_later(bounce))
+    asyncio.create_task(_del_later(ctx.message))
 
 # ============================================================
 #                     UI: MODALS & VIEWS
@@ -113,10 +236,8 @@ class ClanSearchModal(Modal, title="C1C-Matchmaker • Search"):
         self.view_ref = view
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Owner/admin check lives in view.run_search
         q = str(self.query.value or "").strip()
         await self.view_ref.run_search(interaction, q)
-
 
 def build_panel_embed(user: discord.abc.User) -> discord.Embed:
     e = discord.Embed(
@@ -132,7 +253,6 @@ def build_panel_embed(user: discord.abc.User) -> discord.Embed:
     e.set_footer(text="C1C · Match smart, play together")
     return e
 
-
 def can_control(inter: discord.Interaction, owner_id: int) -> bool:
     if inter.user.id == owner_id:
         return True
@@ -143,20 +263,13 @@ def can_control(inter: discord.Interaction, owner_id: int) -> bool:
         return True
     return False
 
-
 def chunk_fields(items: List[str], hard_cap: int = 25) -> List[List[str]]:
-    """Split list into chunks of <= 25 (embed field limit)."""
     out = []
     for i in range(0, len(items), hard_cap):
         out.append(items[i:i + hard_cap])
     return out
 
-
 def render_results_to_embeds(results: List[Dict], query: str) -> List[discord.Embed]:
-    """
-    Render all results into **one message** (possibly multiple embeds),
-    but we will send them in a single send/edit call.
-    """
     if not results:
         e = discord.Embed(
             title="No clans found",
@@ -182,7 +295,6 @@ def render_results_to_embeds(results: List[Dict], query: str) -> List[discord.Em
         body = "\n".join(bits) if bits else "*No extra details provided.*"
         lines.append((head, body))
 
-    # Build embeds with fields (<=25 per embed)
     embeds: List[discord.Embed] = []
     chunks = chunk_fields(lines, hard_cap=25)
     for idx, group in enumerate(chunks, start=1):
@@ -200,10 +312,8 @@ def render_results_to_embeds(results: List[Dict], query: str) -> List[discord.Em
         embeds.append(e)
     return embeds
 
-
 class ReloadView(View):
     def __init__(self, owner_id: int):
-        # no timeout; we want the button to stick until clicked
         super().__init__(timeout=None)
         self.owner_id = owner_id
         self.message: Optional[discord.Message] = None
@@ -214,11 +324,8 @@ class ReloadView(View):
             return await inter.response.send_message(
                 "Only the original summoner or an admin can reload this panel.", ephemeral=True
             )
-
-        # Replace with a fresh panel + fresh view
         new_view = ClanMatchView(owner_id=self.owner_id, timeout=PANEL_TIMEOUT_SECONDS)
         embed = build_panel_embed(inter.user if inter.user.id == self.owner_id else inter.client.user)
-
         try:
             if self.message:
                 await self.message.edit(embed=embed, view=new_view)
@@ -232,21 +339,17 @@ class ReloadView(View):
             log.exception("Failed to reload panel: %s", e)
             await inter.response.send_message("Couldn't reload panel (missing perms?).", ephemeral=True)
 
-
 class ClanMatchView(View):
     """
-    Main interactive panel.
-    - Posts ALL search results in ONE message (possibly multi-embed) and keeps a reference.
-    - Reset deletes that single results message.
-    - On timeout, wipes results, disables self, and swaps to a 'Reload new search' button.
+    - Posts ALL search results in ONE message
+    - Reset deletes that results message
+    - On timeout/close: wipes results, disables panel, shows Reload button
     """
     def __init__(self, owner_id: int, timeout: Optional[float] = PANEL_TIMEOUT_SECONDS):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
         self.panel_message: Optional[discord.Message] = None
         self.results_message: Optional[discord.Message] = None
-
-    # ---------------- Buttons ----------------
 
     @button(label="Search", style=discord.ButtonStyle.blurple, emoji="🔎")
     async def btn_search(self, inter: discord.Interaction, btn: Button):
@@ -282,10 +385,7 @@ class ClanMatchView(View):
             return await inter.response.send_message(
                 "Only the original summoner or an admin can close this panel.", ephemeral=True
             )
-        # Disable immediately & flip to reload button (same as on_timeout)
         await self._expire_to_reload(inter)
-
-    # ---------------- Actions ----------------
 
     async def run_search(self, inter: discord.Interaction, query: str):
         if not can_control(inter, self.owner_id):
@@ -293,7 +393,6 @@ class ClanMatchView(View):
                 "Only the original summoner or an admin can search.", ephemeral=True
             )
 
-        # Nuke prior results message to keep the channel clean
         if self.results_message:
             try:
                 await self.results_message.delete()
@@ -306,31 +405,27 @@ class ClanMatchView(View):
         embeds = render_results_to_embeds(results, query)
 
         try:
-            # One message send containing all embeds
             msg = await inter.channel.send(embeds=embeds)
             self.results_message = msg
             await inter.followup.send(
                 f"Posted **{len(results)}** result(s) in a single message.", ephemeral=True
             )
         except Exception as e:
-            log.exception("Failed to post search results: %s", e)
+            log.exception("Failed to post results: %s", e)
             await inter.followup.send("Couldn't post results (missing perms?).", ephemeral=True)
 
-    # ---------------- Expiry Handling ----------------
+    # ----- Expiry Handling -----
 
     async def on_timeout(self):
-        # On timeout: wipe prior results, then disable and flip to Reload
         await self._wipe_results()
         try:
             if self.panel_message:
                 for child in self.children:
                     child.disabled = True
-                # Show disabled view immediately, then swap to ReloadView w/ explicit notice
                 await self.panel_message.edit(view=self)
 
                 reload_view = ReloadView(owner_id=self.owner_id)
                 reload_view.message = self.panel_message
-
                 expired = discord.Embed(
                     title="C1C-Matchmaker Panel",
                     description=(
@@ -342,10 +437,9 @@ class ClanMatchView(View):
                 )
                 await self.panel_message.edit(embed=expired, view=reload_view)
         except Exception as e:
-            log.debug("on_timeout edit failed (message likely gone): %s", e)
+            log.debug("on_timeout edit failed: %s", e)
 
     async def _expire_to_reload(self, inter: discord.Interaction):
-        # Manual close mirrors timeout behavior (also wipe results)
         await self._wipe_results()
         try:
             for child in self.children:
@@ -372,7 +466,6 @@ class ClanMatchView(View):
                 pass
 
     async def _wipe_results(self):
-        """Delete the last results message silently, if any."""
         if self.results_message:
             try:
                 await self.results_message.delete()
@@ -380,33 +473,61 @@ class ClanMatchView(View):
                 pass
             self.results_message = None
 
-
 # ============================================================
 #                        COMMANDS
 # ============================================================
 
 @bot.command(name="clanmatch", help="Summon the C1C-Matchmaker panel.")
 async def clanmatch(ctx: commands.Context):
-    # Post panel with ownership notice
+    # Resolve target thread
+    target_thread = await _resolve_target_thread(ctx)
+    if not target_thread:
+        await ctx.reply(
+            "Couldn't resolve a target thread. Check env config and bot permissions.",
+            mention_author=True
+        )
+        return
+
+    # Panel in the resolved thread
     embed = build_panel_embed(ctx.author)
     view = ClanMatchView(owner_id=ctx.author.id, timeout=PANEL_TIMEOUT_SECONDS)
-    msg = await ctx.send(embed=embed, view=view)
-    view.panel_message = msg  # so on_timeout can edit it
+    msg = await target_thread.send(embed=embed, view=view)
+    view.panel_message = msg
 
-    # Optional: teach users quickly
+    # Pointer in invoking channel; auto-delete pointer & the command
+    await _post_pointer_and_schedule_cleanup(ctx, target_thread)
+
     try:
         await ctx.message.add_reaction("🔎")
     except Exception:
         pass
 
-
-# ---------- Basic Up signal ----------
+# ---------- Lifecycle ----------
 @bot.event
 async def on_ready():
     log.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
-# ---------- Run ----------
+# ---------- Render Web Server (keeps Web Service happy) ----------
+async def _health(_):
+    return web.Response(text="ok")
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/healthz", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
+    await site.start()
+    log.info("HTTP server listening on 0.0.0.0:%s (Render health)", WEB_PORT)
+
+# ---------- Main ----------
+async def main():
+    await start_webserver()  # start the tiny HTTP server first
+    async with bot:
+        await bot.start(TOKEN)
+
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in env.")
-    bot.run(TOKEN)
+    asyncio.run(main())
