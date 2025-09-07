@@ -15,7 +15,8 @@ from typing import List, Dict, Optional, Sequence
 
 import discord
 from discord.ext import commands
-from discord.ui import View, button, Button, Select, SelectOption
+from discord.ui import View, button, Button, Select
+from discord import SelectOption  # or just use discord.SelectOption inline
 from aiohttp import web
 
 # ---------------- Logging ----------------
@@ -659,3 +660,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in env.")
     asyncio.run(main())
+
