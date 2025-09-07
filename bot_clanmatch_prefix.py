@@ -135,10 +135,50 @@ def cell_equals_10(cell_text: str, expected: str | None) -> bool:
         return True
     return (cell_text or "").strip() == expected  # exact 1/0
 
+# Exact, token-based playstyle matching (no substring matches)
+STYLE_CANON = {
+    "STRESS FREE": "STRESSFREE",
+    "STRESS-FREE": "STRESSFREE",
+    "STRESSFREE": "STRESSFREE",
+    "CASUAL": "CASUAL",
+    "SEMI COMPETITIVE": "SEMICOMPETITIVE",
+    "SEMI-COMPETITIVE": "SEMICOMPETITIVE",
+    "SEMICOMPETITIVE": "SEMICOMPETITIVE",
+    "COMPETITIVE": "COMPETITIVE",
+}
+
+def _canon_style(s: str) -> str | None:
+    s = (s or "").strip().upper()
+    s = re.sub(r"\s+", " ", s.replace("-", " "))
+    # try exact canonical first
+    if s in STYLE_CANON:
+        return STYLE_CANON[s]
+    # fall back to a few common forms
+    if s == "SEMI COMPETITIVE":
+        return "SEMICOMPETITIVE"
+    if s == "STRESS FREE":
+        return "STRESSFREE"
+    return s if s in {"STRESSFREE", "CASUAL", "SEMICOMPETITIVE", "COMPETITIVE"} else None
+
+def _split_styles(cell_text: str) -> set[str]:
+    # split on common delimiters and canonicalize each token
+    parts = re.split(r"[,\|/;]+", cell_text or "")
+    out = set()
+    for p in parts:
+        c = _canon_style(p)
+        if c:
+            out.add(c)
+    return out
+
 def playstyle_ok(cell_text: str, value: str | None) -> bool:
     if not value:
         return True
-    return norm(value) in norm(cell_text)
+    wanted = _canon_style(value)
+    if not wanted:
+        return True  # unknown filter value → don't block results
+    available = _split_styles(cell_text)
+    return wanted in available
+
 
 def parse_spots_num(cell_text: str) -> int:
     m = re.search(r"\d+", cell_text or "")
@@ -1190,6 +1230,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
