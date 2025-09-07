@@ -334,6 +334,8 @@ class PagedResultsView(discord.ui.View):
         self.message: discord.Message | None = None
         self.results_message: discord.Message | None = None  # last results message we posted
         self._active_view: discord.ui.View | None = None     # last pager view (if any) attached to results
+        self.results_message: discord.Message | None = None  # last posted results bubble
+        self._active_view: discord.ui.View | None = None     # pager attached to that bubble
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user and itx.user.id == self.author_id:
@@ -1249,6 +1251,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
