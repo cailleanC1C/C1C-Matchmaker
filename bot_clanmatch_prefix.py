@@ -1,18 +1,5 @@
 # bot_clanmatch_prefix.py
 # C1C Matchmaker — recruiter & user panels, strict GSheets, hybrid thread routing.
-# Commands:
-#   !clanmatch  -> recruiter panel (hybrid: per-recruiter thread if role; else fixed thread)
-#   !clansearch -> user panel (in invoking channel)
-#   !clan       -> clan profile (tag or name)
-#   !ping, !health, !reload -> utility commands
-#
-# Behaviors:
-#   - Recruiter Search posts ALL results in ONE message (chunks if >10 embeds)
-#   - Reset also deletes the last results message(s)
-#   - Expire/Close disables panel, wipes results, shows "Reload new search"
-#   - Pointer: when !clanmatch panel appears in a thread, the invoking channel gets a link that self-deletes
-#
-# Requires: discord.py v2.x, aiohttp; gspread/google-auth for Google Sheets
 
 import os
 import json
@@ -26,30 +13,23 @@ from discord.ui import View, button, Button, Select
 from discord import SelectOption
 from aiohttp import web
 
-# ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("c1c")
 
-# ---------------- ENV ----------------
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 # Thread routing (for !clanmatch)
-# Modes: off | fixed | per_recruiter | hybrid
-PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "hybrid").lower()
-PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))  # fixed thread id
-PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0"))  # parent channel for recruiter threads
+PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "hybrid").lower()  # off|fixed|per_recruiter|hybrid
+PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))
+PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0"))
 RECRUITER_ROLE_IDS = tuple(int(x) for x in os.environ.get("RECRUITER_ROLE_IDS", "").split(",") if x.strip().isdigit())
 PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "1440"))  # 60|1440|4320|10080
 PANEL_BOUNCE_DELETE_SECONDS = int(os.environ.get("PANEL_BOUNCE_DELETE_SECONDS", "600"))
+PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))
 
-# Panel timeout
-PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))  # 10min default
-
-# Google Sheets (strict; no fallback)
+# Google Sheets (strict; no demo)
 GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-
-# Accept both new and old envs; default to your old tab
 CLANS_WORKSHEET_NAME = (
     os.environ.get("CLANS_WORKSHEET_NAME")
     or os.environ.get("WORKSHEET_NAME")
@@ -57,20 +37,16 @@ CLANS_WORKSHEET_NAME = (
 )
 USE_GSHEETS = bool(GSPREAD_CREDENTIALS and GOOGLE_SHEET_ID)
 
-# Render web server
 WEB_PORT = int(os.environ.get("PORT", "10000"))
 
-# ---------------- Discord Setup ----------------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Keep strong refs to live views so GC never kills timeout callbacks
+# Keep strong refs to live views so timeouts always fire
 LIVE_VIEWS: dict[int, View] = {}
 
-# ============================================================
-#                       DATA ACCESS (STRICT)
-# ============================================================
+# ---------------- Data access ----------------
 
 def _normalize(s: Optional[str]) -> str:
     return (s or "").strip()
@@ -91,12 +67,12 @@ def _get(row: Dict[str, str], *keys: str) -> str:
     return ""
 
 def fetch_clans_raw() -> List[Dict]:
-    """Google Sheets only, with diagnostic errors."""
+    """Google Sheets only. Be resilient to blank/duplicate headers."""
     if not USE_GSHEETS:
         raise RuntimeError("DATA_SOURCE_MISCONFIGURED")
     try:
         import gspread
-        from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError
+        from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError, GSpreadException
         from google.oauth2.service_account import Credentials
 
         creds_info = json.loads(GSPREAD_CREDENTIALS)
@@ -115,10 +91,39 @@ def fetch_clans_raw() -> List[Dict]:
         except WorksheetNotFound as e:
             raise RuntimeError(f"WORKSHEET_NOT_FOUND:{CLANS_WORKSHEET_NAME}") from e
 
-        return ws.get_all_records()
+        # First try the simple path.
+        try:
+            return ws.get_all_records()
+        except GSpreadException as e:
+            # Typical when header row has duplicates like '' (empty).
+            # Fallback: build records manually and ignore empty/duplicate headers.
+            values = ws.get_all_values()
+            if not values:
+                return []
+            raw_headers = [(h or "").strip() for h in values[0]]
+            seen = set()
+            keep_idx: List[int] = []
+            headers: List[str] = []
+            for idx, h in enumerate(raw_headers):
+                if not h:
+                    continue  # drop empty header columns
+                if h in seen:
+                    continue  # drop duplicate header columns
+                seen.add(h)
+                keep_idx.append(idx)
+                headers.append(h)
+            data: List[Dict] = []
+            for row in values[1:]:
+                rec: Dict[str, str] = {}
+                for name, i in zip(headers, keep_idx):
+                    if i < len(row):
+                        rec[name] = row[i]
+                if any(_normalize(v) for v in rec.values()):
+                    data.append(rec)
+            return data
 
-    except json.JSONDecodeError as e:
-        raise RuntimeError("CREDS_BAD_JSON") from e
+    except json.JSONDecodeError:
+        raise RuntimeError("CREDS_BAD_JSON")
     except APIError as e:
         status = getattr(getattr(e, "response", None), "status_code", None)
         if status in (401, 403):
@@ -162,9 +167,7 @@ def filter_rows(rows: List[Dict], f: Dict) -> List[Dict]:
                 out.append(r)
     return out
 
-# ============================================================
-#                         THREAD HELPERS
-# ============================================================
+# ---------------- Thread helpers ----------------
 
 async def _unarchive_if_needed(thread: discord.Thread) -> discord.Thread:
     try:
@@ -216,15 +219,12 @@ async def _get_or_create_recruiter_thread(ctx: commands.Context) -> Optional[dis
         return None
 
     name = f"Matchmaker — {ctx.author.display_name} · {ctx.author.id}"
-    # active list
     for t in parent.threads:
         if t.name == name:
             return await _unarchive_if_needed(t)
-    # archived list
     t = await _find_archived_by_name(parent, name)
     if t:
         return await _unarchive_if_needed(t)
-    # create new
     try:
         return await parent.create_thread(
             name=name,
@@ -235,7 +235,6 @@ async def _get_or_create_recruiter_thread(ctx: commands.Context) -> Optional[dis
         return None
 
 async def _resolve_panel_target(ctx: commands.Context) -> discord.abc.Messageable:
-    """Return where to send the !clanmatch panel."""
     mode = PANEL_THREAD_MODE
     if mode == "off":
         return ctx.channel
@@ -245,13 +244,11 @@ async def _resolve_panel_target(ctx: commands.Context) -> discord.abc.Messageabl
         if isinstance(ctx.author, discord.Member) and _is_recruiter(ctx.author):
             return (await _get_or_create_recruiter_thread(ctx)) or ctx.channel
         return ctx.channel
-    # hybrid: recruiters -> per-recruiter thread; others -> fixed thread.
     if isinstance(ctx.author, discord.Member) and _is_recruiter(ctx.author):
         return (await _get_or_create_recruiter_thread(ctx)) or (await _get_fixed_thread()) or ctx.channel
     return (await _get_fixed_thread()) or ctx.channel
 
 async def _delete_after(delay: int, message: Optional[discord.Message]):
-    """Robust delayed delete with a quick retry."""
     if not message:
         return
     try:
@@ -263,7 +260,6 @@ async def _delete_after(delay: int, message: Optional[discord.Message]):
             pass
 
 async def _pointer_and_cleanup(ctx: commands.Context, thread: discord.Thread):
-    """Leave a self-deleting pointer in invoking channel and delete the command."""
     try:
         bounce = await ctx.reply(
             f"📎 Summoned matchmaking panel here → {thread.mention}\n"
@@ -275,9 +271,7 @@ async def _pointer_and_cleanup(ctx: commands.Context, thread: discord.Thread):
     asyncio.create_task(_delete_after(PANEL_BOUNCE_DELETE_SECONDS, bounce))
     asyncio.create_task(_delete_after(PANEL_BOUNCE_DELETE_SECONDS, ctx.message))
 
-# ============================================================
-#                        UI HELPERS
-# ============================================================
+# ---------------- UI helpers ----------------
 
 def _mins_label(n: int) -> str:
     return f"{n} min" if n == 1 else f"{n} mins"
@@ -294,11 +288,7 @@ def _can_control(inter: discord.Interaction, owner_id: int) -> bool:
 
 def _results_embeds(results: List[Dict], label: str) -> List[discord.Embed]:
     if not results:
-        e = discord.Embed(
-            title="No clans found",
-            description="Try different filters.",
-            color=discord.Color.red()
-        )
+        e = discord.Embed(title="No clans found", description="Try different filters.", color=discord.Color.red())
         if label:
             e.add_field(name="Filters", value=label, inline=False)
         return [e]
@@ -353,9 +343,7 @@ def _panel_embed(user: discord.abc.User, title: str) -> discord.Embed:
     e.set_footer(text="C1C · Match smart, play together")
     return e
 
-# ============================================================
-#                        PANEL VIEWS
-# ============================================================
+# ---------------- Panels ----------------
 
 CB_LEVELS    = ["", "Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_LEVELS = ["", "Normal", "Hard", "Brutal", "Nightmare"]
@@ -398,7 +386,7 @@ class ReloadView(View):
         try:
             await self.message.edit(embed=_panel_embed(itx.user, self.factory.TITLE), view=new_view)
             new_view.panel_message = self.message
-            LIVE_VIEWS[self.message.id] = new_view  # keep alive
+            LIVE_VIEWS[self.message.id] = new_view
             await itx.response.send_message("New panel loaded.", ephemeral=True)
         except Exception:
             try: await itx.response.send_message("Couldn't reload here.", ephemeral=True)
@@ -410,7 +398,6 @@ class BasePanelView(View):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
         self.panel_message: Optional[discord.Message] = None
-        # track posted results so Reset/Expire can delete them
         self._results: List[discord.Message] = []
 
     async def _wipe_results(self):
@@ -423,11 +410,9 @@ class BasePanelView(View):
     async def on_timeout(self):
         await self._wipe_results()
         if self.panel_message:
-            # disable controls
             for c in self.children: c.disabled = True
             try: await self.panel_message.edit(view=self)
             except Exception: pass
-            # swap to reload
             rv = ReloadView(self.owner_id, type(self)); rv.message = self.panel_message
             try:
                 await self.panel_message.edit(
@@ -463,15 +448,12 @@ class BasePanelView(View):
             if self.panel_message:
                 LIVE_VIEWS.pop(self.panel_message.id, None)
 
-# Recruiter panel (with chips)
 class RecruiterPanelView(BasePanelView):
     TITLE = "C1C-Matchmaker • Recruiter Panel"
     def __init__(self, owner_id: int, timeout: Optional[float]):
         super().__init__(owner_id, timeout)
-        # state
         self.clanboss=""; self.hydra=""; self.chimera=""; self.playstyle=""
         self.cvc="—"; self.siege="—"; self.roster="All"
-        # controls
         self.add_item(LabeledSelect("CB Difficulty (optional)", CB_LEVELS, "clanboss"))
         self.add_item(LabeledSelect("Hydra Difficulty (optional)", HYDRA_LEVELS, "hydra"))
         self.add_item(LabeledSelect("Chimera Difficulty (optional)", CHIMERA_LVLS, "chimera"))
@@ -499,7 +481,7 @@ class RecruiterPanelView(BasePanelView):
             new = RecruiterPanelView(self.owner_id, self.timeout); new.panel_message=self.panel_message
             try: await i.response.edit_message(view=new)
             except discord.InteractionResponded: await i.edit_original_response(view=new)
-            LIVE_VIEWS[self.panel_message.id] = new  # keep alive
+            LIVE_VIEWS[self.panel_message.id] = new
             try: await i.followup.send("Panel reset & previous results removed.", ephemeral=True)
             except Exception: pass
 
@@ -524,8 +506,6 @@ class RecruiterPanelView(BasePanelView):
                 f"Roster={self.roster}" if self.roster!="All" else ""
             ] if p])
             embeds = _results_embeds(res, label)
-
-            # Batch embeds into as few messages as possible (Discord caps 10 embeds/message)
             CHUNK = 10
             for i0 in range(0, len(embeds), CHUNK):
                 msg = await i.channel.send(embeds=embeds[i0:i0+CHUNK])
@@ -535,7 +515,6 @@ class RecruiterPanelView(BasePanelView):
         self.btn_cvc.callback=_cvc; self.btn_siege.callback=_siege; self.btn_roster.callback=_roster
         self.btn_reset.callback=_reset; self.btn_search.callback=_search
 
-# User panel (simpler UI; also batches to one message for consistency)
 class UserPanelView(BasePanelView):
     TITLE = "C1C-Matchmaker • User Panel"
     def __init__(self, owner_id: int, timeout: Optional[float]):
@@ -584,9 +563,7 @@ class UserPanelView(BasePanelView):
 
         self.btn_reset.callback=_reset; self.btn_search.callback=_search
 
-# ============================================================
-#                        COMMANDS
-# ============================================================
+# ---------------- Commands ----------------
 
 @bot.command(name="clanmatch", help="Recruiter panel.")
 async def clanmatch_cmd(ctx: commands.Context):
@@ -595,13 +572,10 @@ async def clanmatch_cmd(ctx: commands.Context):
     view = RecruiterPanelView(owner_id=ctx.author.id, timeout=PANEL_TIMEOUT_SECONDS)
     msg = await target.send(embed=embed, view=view)
     view.panel_message = msg
-    LIVE_VIEWS[msg.id] = view  # keep alive until timeout/close
-
-    # pointer in invoking channel (only if we posted in a different thread)
+    LIVE_VIEWS[msg.id] = view
     if isinstance(target, discord.Thread) and target.id != getattr(ctx.channel, "id", None):
         await _pointer_and_cleanup(ctx, target)
     else:
-        # best effort: clean up the command anyway
         asyncio.create_task(_delete_after(PANEL_BOUNCE_DELETE_SECONDS, ctx.message))
 
 @bot.command(name="clansearch", help="User panel.")
@@ -635,16 +609,13 @@ async def clan_cmd(ctx: commands.Context, *, ident: str):
 
     name = _get(best,"Name") or "Unknown Clan"
     tag  = _get(best,"Tag")
-    e = discord.Embed(
-        title=f"{name}" + (f" [{tag}]" if tag else ""),
-        color=discord.Color.blue()
-    )
+    e = discord.Embed(title=f"{name}" + (f" [{tag}]" if tag else ""), color=discord.Color.blue())
     for k in ("ClanBoss","Hydra","Chimera","CvC","Siege","Roster","Playstyle","Vibe"):
         v = _get(best,k)
         if v: e.add_field(name=k, value=v, inline=True)
     await ctx.send(embed=e)
 
-# ---------- Utility commands ----------
+# Utilities
 @bot.command(name="ping", help="Check bot latency.")
 async def ping_cmd(ctx: commands.Context):
     await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
@@ -656,85 +627,29 @@ async def health_cmd(ctx: commands.Context):
 @bot.command(name="reload", help="Reload clan list (admin only).")
 @commands.has_permissions(administrator=True)
 async def reload_cmd(ctx: commands.Context):
-    # no caching yet; this confirms wiring
     await ctx.send("Reloaded.")
 
-@bot.command(name="gsdiag", help="Admin-only: diagnose Google Sheets connectivity.")
-@commands.has_permissions(administrator=True)
-async def gsdiag_cmd(ctx: commands.Context):
-    try:
-        import gspread
-        from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError
-        from google.oauth2.service_account import Credentials
-        import json
-
-        # show what the bot *thinks* the worksheet name is
-        worksheet_name = (
-            os.environ.get("CLANS_WORKSHEET_NAME")
-            or os.environ.get("WORKSHEET_NAME")
-            or "bot_info"
-        )
-
-        creds_info = json.loads(os.environ["GSPREAD_CREDENTIALS"])
-        client_email = creds_info.get("client_email", "<no-client-email>")
-        creds = Credentials.from_service_account_info(
-            creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        )
-        gc = gspread.authorize(creds)
-
-        sh = gc.open_by_key(os.environ["GOOGLE_SHEET_ID"])
-        try:
-            ws = sh.worksheet(worksheet_name)
-        except WorksheetNotFound:
-            return await ctx.send(f"❌ Worksheet not found: `{worksheet_name}`. Tabs: {[w.title for w in sh.worksheets()]}")
-        rows = ws.get_all_records()
-        return await ctx.send(
-            f"✅ Sheets OK. Worksheet=`{worksheet_name}`, rows={len(rows)}. "
-            f"Service account={client_email}"
-        )
-
-    except json.JSONDecodeError as e:
-        return await ctx.send("❌ CREDS_BAD_JSON: your GSPREAD_CREDENTIALS is not valid JSON.")
-    except SpreadsheetNotFound as e:
-        return await ctx.send("❌ SHEET_NOT_FOUND: bad GOOGLE_SHEET_ID or no access.")
-    except APIError as e:
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
-            return await ctx.send("❌ SHEET_NOT_SHARED: share the sheet with the service account’s client_email.")
-        return await ctx.send(f"❌ GSHEETS_API_ERROR: {e}")
-    except Exception as e:
-        # show exact exception class & msg so we’re not blind
-        return await ctx.send(f"❌ DATA_SOURCE_UNAVAILABLE: {e.__class__.__name__}: {e}")
-
-
-# ---------- Friendly error messages (UI-side) ----------
+# Friendly error messages
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     original = getattr(error, "original", error)
-
     if isinstance(error, commands.CommandNotFound):
         return await ctx.send("Unknown command. Try `!help`.")
-
     if isinstance(error, commands.MissingRequiredArgument):
         if ctx.command and ctx.command.name == "clan":
             return await ctx.send("Usage: `!clan <tag|name>`")
         return await ctx.send(f"Missing parameter. Usage: `!{ctx.command.qualified_name} {ctx.command.signature}`")
-
     if isinstance(error, commands.CheckFailure):
         return await ctx.send("You don't have permission to do that here.")
-
     if isinstance(error, commands.CommandOnCooldown):
         return await ctx.send(f"Slow down. Try again in {error.retry_after:.1f}s.")
-
     if isinstance(original, discord.Forbidden):
         return await ctx.send(
             "I can’t do that here. Please give me **Send Messages**, **Embed Links**, "
             "**Send Messages in Threads**, **Create Public Threads**, and **Manage Messages**."
         )
-
     if isinstance(original, discord.HTTPException):
         return await ctx.send("Discord rejected that request. Try again or tweak your filters.")
-
     try:
         cmd_name = getattr(ctx.command, "qualified_name", "unknown")
         log.exception("Unhandled error in command %s", cmd_name, exc_info=original)
@@ -742,9 +657,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
         pass
     await ctx.send("Something went wrong. I’ve logged the details.")
 
-# ============================================================
-#                      BOT LIFECYCLE / WEB
-# ============================================================
+# ---------------- Lifecycle / web ----------------
 
 @bot.event
 async def on_ready():
