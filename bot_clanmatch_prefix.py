@@ -16,9 +16,12 @@ from aiohttp import web, ClientSession
 from PIL import Image  # Pillow
 
 import json, time, os
-import requests
+import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError, WorksheetNotFound
+
+import requests
+from google.auth.transport.requests import Request  # for token refresh
 
 # Replace/ensure SCOPES include spreadsheets & drive read:
 SCOPES = [
@@ -56,6 +59,35 @@ if not SHEET_ID:
 print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
 print(f"[boot] BASE_URL={BASE_URL}", flush=True)
 
+def _build_creds():
+    return Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+
+def _get_bearer_token():
+    creds = _build_creds()
+    creds.refresh(Request())
+    return creds.token
+
+def _sheets_values_get(sheet_id: str, tab: str):
+    token = _get_bearer_token()
+    rng = f"{tab}!A1:ZZ9999"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{requests.utils.quote(rng, safe='!')}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Sheets values.get failed: {r.status_code} {r.text[:180]}")
+    return r.json().get("values", []) or []
+
+def _sheets_list_tabs(sheet_id: str):
+    token = _get_bearer_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?includeGridData=false"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Sheets meta get failed: {r.status_code} {r.text[:180]}")
+    meta = r.json()
+    tabs = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    title = meta.get("properties", {}).get("title", "(untitled)")
+    return title, tabs
+
+
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
 _ws = None
@@ -79,26 +111,38 @@ def get_ws(force: bool = False):
         _ws = None
     if _ws is not None:
         return _ws
-    creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+    creds = _build_creds()
     _gc = gspread.authorize(creds)
     _ws = _gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
     print("[sheets] Connected to worksheet OK", flush=True)
     return _ws
 
 def get_rows(force: bool = False):
-    """Return all rows with simple 60s cache."""
+    """Return all rows with simple 60s cache. Falls back to raw Sheets API if gspread errors."""
     global _cache_rows, _cache_time
     if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
-        ws = get_ws(False)
-        _cache_rows = ws.get_all_values()
+        try:
+            ws = get_ws(False)
+            _cache_rows = ws.get_all_values()
+        except WorksheetNotFound:
+            raise RuntimeError(f"Worksheet '{WORKSHEET_NAME}' not found. Rename the tab or set WORKSHEET_NAME.")
+        except APIError as e:
+            # The infamous 400: “operation not supported for this document”
+            print(f"[sheets] gspread APIError -> fallback: {e}", flush=True)
+            _cache_rows = _sheets_values_get(SHEET_ID, WORKSHEET_NAME)
+        except Exception as e:
+            print(f"[sheets] gspread unknown error -> fallback: {e}", flush=True)
+            _cache_rows = _sheets_values_get(SHEET_ID, WORKSHEET_NAME)
         _cache_time = time.time()
     return _cache_rows
 
+
 def clear_cache():
-    global _cache_rows, _cache_time, _ws
+    global _cache_rows, _cache_time, _ws, _gc
     _cache_rows = None
     _cache_time = 0.0
-    _ws = None  # reconnect next time
+    _ws = None
+    _gc = None
 
 def _sheets_values_get(sheet_id: str, tab: str):
     """Read values via Sheets HTTP API v4 — no googleapiclient needed."""
@@ -218,8 +262,14 @@ def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | N
         return None
     size = size or EMOJI_PAD_SIZE
     box  = box  or EMOJI_PAD_BOX
-    q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box), "v": str(emj.id)})
-    return f"{base.rstrip('/')}/emoji-pad?{q}"
+    # SSRF guard
+try:
+    host = urllib.parse.urlparse(src).hostname or ""
+    ALLOWED_HOSTS = {"cdn.discordapp.com", "media.discordapp.net", "images-ext-1.discordapp.net"}
+    if STRICT_EMOJI_PROXY and host not in ALLOWED_HOSTS:
+        return web.Response(status=400, text="host not allowed")
+except Exception:
+    return web.Response(status=400, text="bad url")
 
 # ------------------- Panel copy helpers -------------------
 def panel_intro(spawn_cmd: str, owner_mention: str, private: bool = False) -> str:
@@ -994,5 +1044,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
