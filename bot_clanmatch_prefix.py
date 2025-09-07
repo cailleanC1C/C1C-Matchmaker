@@ -33,6 +33,16 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 # Public base URL for proxying padded emoji images
 BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
+# ---- Thread routing for !clanmatch ----
+# Modes: off | fixed | per_recruiter | hybrid   (hybrid = recruiter -> per_recruiter, others -> fixed)
+PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "hybrid").lower()
+PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))
+PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0"))  # recruiter threads live here
+RECRUITER_ROLE_IDS = tuple(int(x) for x in os.environ.get("RECRUITER_ROLE_IDS", "").split(",") if x.strip().isdigit())
+PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "1440"))  # 60 | 1440 | 4320 | 10080
+PANEL_BOUNCE_DELETE_SECONDS = int(os.environ.get("PANEL_BOUNCE_DELETE_SECONDS", "600"))  # pointer + command delete TTL
+
+
 # Padded-emoji tunables
 EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
 EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
@@ -44,15 +54,6 @@ if not SHEET_ID:
     print("[boot] GOOGLE_SHEET_ID missing", flush=True)
 print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
 print(f"[boot] BASE_URL={BASE_URL}", flush=True)
-
-# ---- Thread routing for !clanmatch ----
-# Modes: off | fixed | per_recruiter | hybrid   (hybrid = recruiter -> per_recruiter, others -> fixed)
-PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "hybrid").lower()
-PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))
-PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0"))  # recruiter threads live here
-RECRUITER_ROLE_IDS = tuple(int(x) for x in os.environ.get("RECRUITER_ROLE_IDS", "").split(",") if x.strip().isdigit())
-PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "1440"))  # 60 | 1440 | 4320 | 10080
-PANEL_BOUNCE_DELETE_SECONDS = int(os.environ.get("PANEL_BOUNCE_DELETE_SECONDS", "600"))  # pointer + command delete TTL
 
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
@@ -322,14 +323,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
-COOLDOWN_SEC = 2.0
 
-CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
-HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
-CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
-PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
-
-# ---- Thread helpers for !clanmatch ----
+# ---- thread helper functions (for !clanmatch) ----
 async def _unarchive_if_needed(thread: discord.Thread) -> discord.Thread:
     try:
         if thread.archived:
@@ -353,12 +348,7 @@ def _is_recruiter(member: discord.Member) -> bool:
 async def _get_fixed_thread() -> discord.Thread | None:
     if not PANEL_FIXED_THREAD_ID:
         return None
-    ch = bot.get_channel(PANEL_FIXED_THREAD_ID)
-    if ch is None:
-        try:
-            ch = await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
-        except Exception:
-            ch = None
+    ch = bot.get_channel(PANEL_FIXED_THREAD_ID) or await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
     if isinstance(ch, discord.Thread):
         return await _unarchive_if_needed(ch)
     return None
@@ -366,16 +356,11 @@ async def _get_fixed_thread() -> discord.Thread | None:
 async def _get_or_create_recruiter_thread(ctx: commands.Context) -> discord.Thread | None:
     if not PANEL_PARENT_CHANNEL_ID:
         return None
-    parent = bot.get_channel(PANEL_PARENT_CHANNEL_ID)
-    if parent is None:
-        try:
-            parent = await bot.fetch_channel(PANEL_PARENT_CHANNEL_ID)
-        except Exception:
-            parent = None
+    parent = bot.get_channel(PANEL_PARENT_CHANNEL_ID) or await bot.fetch_channel(PANEL_PARENT_CHANNEL_ID)
     if not isinstance(parent, discord.TextChannel):
         return None
     name = f"Matchmaker — {ctx.author.display_name} · {ctx.author.id}"
-    # active first
+    # active
     for t in parent.threads:
         if t.name == name:
             return await _unarchive_if_needed(t)
@@ -383,7 +368,7 @@ async def _get_or_create_recruiter_thread(ctx: commands.Context) -> discord.Thre
     t = await _find_archived_by_name(parent, name)
     if t:
         return await _unarchive_if_needed(t)
-    # new
+    # new thread
     try:
         return await parent.create_thread(
             name=name, type=discord.ChannelType.public_thread, auto_archive_duration=PANEL_THREAD_ARCHIVE_MIN
@@ -401,13 +386,13 @@ async def _resolve_panel_target(ctx: commands.Context) -> discord.abc.Messageabl
         if isinstance(ctx.author, discord.Member) and _is_recruiter(ctx.author):
             return (await _get_or_create_recruiter_thread(ctx)) or ctx.channel
         return ctx.channel
-    # hybrid default
+    # hybrid
     if isinstance(ctx.author, discord.Member) and _is_recruiter(ctx.author):
         return (await _get_or_create_recruiter_thread(ctx)) or ctx.channel
     return (await _get_fixed_thread()) or ctx.channel
 
 async def _post_pointer_and_cleanup(ctx: commands.Context, thread: discord.Thread):
-    """Post pointer to thread and schedule deletion of pointer + command."""
+    """Post 'panel here' pointer and auto-delete it + the command later."""
     try:
         bounce = await ctx.reply(
             f"📎 Summoned matchmaking panel here → {thread.mention}\n"
@@ -416,16 +401,23 @@ async def _post_pointer_and_cleanup(ctx: commands.Context, thread: discord.Threa
         )
     except Exception:
         bounce = None
-    async def _later(msg):
-        if not msg:
-            return
+
+    async def _later(msg: discord.Message | None):
+        if not msg: return
         try:
             await asyncio.sleep(PANEL_BOUNCE_DELETE_SECONDS)
             await msg.delete()
         except Exception:
             pass
+
     asyncio.create_task(_later(bounce))
     asyncio.create_task(_later(ctx.message))
+COOLDOWN_SEC = 2.0
+
+CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
+HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
+CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
+PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
 
 
 class ReloadView(discord.ui.View):
@@ -448,8 +440,9 @@ class ReloadView(discord.ui.View):
         new_view._sync_visuals()
         try:
             if self.message:
-                await itx.response.edit_message(embed=self.message.embeds[0] if self.message.embeds else None, view=new_view)
+                await self.message.edit(embed=self.message.embeds[0] if self.message.embeds else None, view=new_view)
                 new_view.message = self.message
+                await itx.response.send_message("New panel loaded.", ephemeral=True)
             else:
                 await itx.response.edit_message(view=new_view)
         except InteractionResponded:
@@ -466,36 +459,37 @@ class ClanMatchView(discord.ui.View):
         self.spawn_cmd = spawn_cmd                # "match" or "search"
         self.owner_mention: str | None = None
 
-        self._results: list[discord.Message] = []  # track results
-
-        self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
+                self._results: list[discord.Message] = []  # track posted result messages
+self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
         self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
         self.message: discord.Message | None = None  # set after sending
 
-    async def on_timeout(self):
-        # wipe results
+    
+async def on_timeout(self):
+        # wipe previous results
         try:
             for m in self._results:
                 await m.delete()
         except Exception:
             pass
         self._results.clear()
-        # disable existing controls
+        # disable all controls
         for child in self.children:
             child.disabled = True
-        # swap to reload button
         try:
             if self.message:
-                embed = discord.Embed(
+                # swap to reload button
+                expired = discord.Embed(
                     title="Find a C1C Clan",
-                    description="⏳ Panel expired. 🧹 Previous results cleared.\nClick **Reload new search**."
+                    description="⏳ This panel expired. 🧹 Previous results cleared.\nClick **Reload new search** to start fresh."
                 )
                 rv = ReloadView(self.author_id, self.embed_variant, self.spawn_cmd)
                 rv.message = self.message
-                await self.message.edit(embed=embed, view=rv)
+                await self.message.edit(embed=expired, view=rv)
         except Exception as e:
             print("[view timeout] failed to edit:", e)
+
 
     def _sync_visuals(self):
         for child in self.children:
@@ -614,24 +608,27 @@ class ClanMatchView(discord.ui.View):
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
-    @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
+    
+@discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        # wipe previous results
+        # delete previous results
         try:
             for m in self._results:
                 await m.delete()
         except Exception:
             pass
         self._results.clear()
+        # clear filters
         self.cb = self.hydra = self.chimera = self.playstyle = None
         self.cvc = self.siege = None
         self.roster_mode = None
         self._sync_visuals()
-        try:    await itx.response.edit_message(view=self)
+        try:
+            await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
 
-    
+
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
@@ -664,22 +661,19 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.send("No matching clans found. Try a different combo.")
             return
 
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
-        builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
-
-        # Classic (recruiter) panel: batch embeds into one message (chunk by 10)
+        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, 
+        # Post results
         if self.embed_variant == "classic":
+            # Recruiter panel: batch ALL embeds into a single message (chunk by 10 if needed)
             embeds = [builder(r, filters_text, itx.guild) for r in matches]
             CHUNK = 10
             for i in range(0, len(embeds), CHUNK):
                 msg = await itx.followup.send(embeds=embeds[i:i+CHUNK])
                 self._results.append(msg)
             return
-
-        # Search (user) panel: keep 1:1 for 💡 flip to profile
+        # User panel: keep 1:1 to preserve 💡 flip behaviour
         for r in matches:
             embed = builder(r, filters_text, itx.guild)
-            # add hint so 💡 can flip to profile
             ft = embed.footer.text or ""
             hint = "React with 💡 for Clan Profile"
             embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
@@ -696,17 +690,12 @@ class ClanMatchView(discord.ui.View):
                 "channel_id": msg.channel.id,
                 "filters": filters_text,
             }
-# ------------------- Commands: panels -------------------
-async def _safe_delete(message: discord.Message):
-    try:
-        await message.delete()
-    except Exception:
-        pass
+
 
 @commands.cooldown(1, 2, commands.BucketType.user)
+
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
-
     # Guard: this command takes no arguments
     if extra and extra.strip():
         msg = (
@@ -737,15 +726,18 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     embed.set_footer(text="Only the summoner can use this panel.")
 
     key = (ctx.author.id, "classic")
+    old_id = ACTIVE_PANELS.get(key)
+
+    # decide target (thread vs channel)
     target = await _resolve_panel_target(ctx)
 
-    old_id = ACTIVE_PANELS.get(key)
     if old_id:
+        # try to reuse existing panel in the target location
         try:
             msg = await target.fetch_message(old_id)
             view.message = msg
             await msg.edit(embed=embed, view=view)
-            # if posted in thread, leave a pointer and schedule cleanup
+            # if posted in a thread, also drop pointer in invoking channel and delete command later
             if isinstance(target, discord.Thread) and target.id != getattr(ctx.channel, "id", None):
                 await _post_pointer_and_cleanup(ctx, target)
             else:
@@ -754,6 +746,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         except Exception:
             pass
 
+    # fresh post to the resolved target
     sent = await target.send(embed=embed, view=view)
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
@@ -762,6 +755,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         await _post_pointer_and_cleanup(ctx, target)
     else:
         await _safe_delete(ctx.message)
+
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
@@ -1104,3 +1098,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
