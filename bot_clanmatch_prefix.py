@@ -1,5 +1,5 @@
-# C1C Matchmaker — bot_clanmatch_prefix.py
-# Env vars supported (preferred first):
+# C1C Matchmaker — bot_clanmatch_prefix.py (robust table reader)
+# Env vars:
 #   GSHEET_ID | GOOGLE_SHEET_ID | CONFIG_SHEET_ID
 #   GOOGLE_SERVICE_ACCOUNT_JSON | SERVICE_ACCOUNT_JSON
 #   DISCORD_TOKEN
@@ -47,7 +47,7 @@ def resolve_emoji_text(guild: _discord.Guild, value: _Optional[str], fallback: _
     e = _discord.utils.find(lambda x: x.name.lower()==v.lower(), guild.emojis)
     return str(e) if e else v
 
-# Channel / thread formatter for human admins
+# Channel / thread formatter
 async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target_id: int | None) -> str:
     if not target_id: return "—"
     obj = guild.get_channel(target_id) or await bot.fetch_channel(target_id)
@@ -56,7 +56,7 @@ async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target
     name = getattr(obj, "name", "unknown")
     return f"{mention} — **{name}** `{target_id}`"
 
-# Sheets client (unified, modern google-auth)
+# Sheets client (modern google-auth)
 def gs_client():
     import gspread as _gspread
     from google.oauth2.service_account import Credentials as _Creds
@@ -71,7 +71,7 @@ def open_sheet_by_env():
     sid = (os.getenv("GSHEET_ID") or os.getenv("GOOGLE_SHEET_ID") or os.getenv("CONFIG_SHEET_ID"))
     if not sid:
         raise RuntimeError("Set GSHEET_ID (or GOOGLE_SHEET_ID / CONFIG_SHEET_ID).")
-    import gspread  # local import for clarity
+    import gspread
     return gs_client().open_by_key(sid)
 # ============================================================================
 
@@ -84,8 +84,7 @@ UTC = timezone.utc
 log = c1c_get_logger("c1c.clanmatch")
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-# Default worksheet/tab for Matchmaker data (case-insensitive)
-DEFAULT_TAB = os.getenv("C1C_MATCH_TAB", "bot_info")
+DEFAULT_TAB = os.getenv("C1C_MATCH_TAB", "bot_info")  # default worksheet/tab
 
 # ------------------- tiny web (Render health) -------------------
 async def _health(_): return web.Response(text="ok")
@@ -103,7 +102,73 @@ intents = c1c_make_intents()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("help")
 
-# ------------------- Helpers for flexible sheets -------------------
+# ------------------- Sheet utilities (robust table reader) -------------------
+def get_ws(sh, name: Optional[str]):
+    """Return worksheet by name, case-insensitive. Uses DEFAULT_TAB if None/empty."""
+    wanted = (name or DEFAULT_TAB).strip()
+    try:
+        return sh.worksheet(wanted)
+    except gspread.WorksheetNotFound:
+        lw = wanted.lower()
+        for ws in sh.worksheets():
+            if ws.title.lower() == lw:
+                return ws
+        raise gspread.WorksheetNotFound(wanted)
+
+def _dedupe_headers(headers: List[str]) -> List[str]:
+    """Trim, replace blanks with _colN, and dedupe by appending _2, _3…"""
+    out = []
+    seen = {}
+    for i, h in enumerate(headers, start=1):
+        base = (h or "").strip()
+        if base == "":
+            base = f"_col{i}"
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        if count == 0:
+            out.append(base)
+        else:
+            out.append(f"{base}_{count+1}")
+    return out
+
+def _looks_like_header(row: List[str]) -> bool:
+    low = { (c or "").strip().lower() for c in row }
+    keys = {"clantag","clan tag","clanname","clan name","tag","name","level","spots"}
+    return any(k in low for k in keys)
+
+def read_records(ws) -> List[Dict[str, str]]:
+    """
+    Robust reader for sheets with blank/duplicate headers or header not on row 1.
+    - Scans first 20 rows to find a likely header.
+    - Dedupe/patch headers, then map remaining rows.
+    - Filters out fully empty rows.
+    """
+    vals = ws.get_all_values()
+    if not vals:
+        return []
+    # find header row
+    header_idx = 0
+    scan_upto = min(20, len(vals))
+    for i in range(scan_upto):
+        if _looks_like_header(vals[i]):
+            header_idx = i
+            break
+    headers = _dedupe_headers(vals[header_idx])
+    data_rows = vals[header_idx+1:]
+    out = []
+    for r in data_rows:
+        # align length
+        if len(r) < len(headers):
+            r = r + [""]*(len(headers)-len(r))
+        elif len(r) > len(headers):
+            r = r[:len(headers)]
+        # skip if completely empty
+        if not any(str(c).strip() for c in r):
+            continue
+        out.append({ headers[i]: r[i] for i in range(len(headers)) })
+    return out
+
+# ------------------- Helpers for flexible data -------------------
 def _pick(d: dict, *names, default=None):
     """Return first present, non-empty value by any of the provided names."""
     for n in names:
@@ -119,8 +184,7 @@ def _to_int_or_none(x):
     except:
         return None
 
-def _plural(n, word):
-    return f"{n} {word}" + ("" if n == 1 else "s")
+def _plural(n, word): return f"{n} {word}" + ("" if n == 1 else "s")
 
 def _boolish(val, default=False):
     s = str(val).strip().lower()
@@ -128,23 +192,8 @@ def _boolish(val, default=False):
     if s in ("0","n","no","false","closed"): return False
     return default
 
-def get_ws(sh, name: Optional[str]):
-    """Return worksheet by name, case-insensitive. Uses DEFAULT_TAB if name is None/empty."""
-    wanted = (name or DEFAULT_TAB).strip()
-    try:
-        return sh.worksheet(wanted)  # exact match
-    except gspread.WorksheetNotFound:
-        lw = wanted.lower()
-        for ws in sh.worksheets():
-            if ws.title.lower() == lw:
-                return ws
-        raise gspread.WorksheetNotFound(wanted)
-
 def format_entry_criteria_row(row: dict) -> str:
-    """
-    Builds the 'Entry Criteria' text robustly from many possible header names.
-    Adjust the synonyms below if your sheet uses different labels.
-    """
+    """Robust 'Entry Criteria' builder supporting many header variants."""
     hydra_keys   = _to_int_or_none(_pick(row, "HydraKeys", "Hydra Keys", "Hydra Key", "Hydra keys"))
     hydra_target = _to_int_or_none(_pick(row, "HydraTargetM", "Hydra Target (M)", "Hydra Clash (M)", "Hydra Clash Target (M)", "Hydra Clash"))
     chim_keys    = _to_int_or_none(_pick(row, "ChimeraKeys", "Chimera Keys", "Chimera Key", "Chim keys"))
@@ -173,16 +222,13 @@ def format_entry_criteria_row(row: dict) -> str:
     return "**Entry Criteria:**\n" + ("\n".join(lines) if lines else "—")
 
 def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.Embed:
-    # Title parts
     tag   = str(_pick(row, "ClanTag", "Tag", "Clan Tag", default="")).strip()
     name  = str(_pick(row, "ClanName", "Name", "Clan Name", default=tag)).strip()
     level = _to_int_or_none(_pick(row, "Level", "Lvl", "Clan Level"))
     spots = _to_int_or_none(_pick(row, "Spots", "Open Spots", "Open", "OpenSlots", "Open spots"))
     title = f"{name}" + (f" | {tag}" if tag else "") + (f" | Level {level}" if level is not None else "") + (f" | Spots: {spots}" if spots is not None else "")
 
-    # Description
     desc_lines = [format_entry_criteria_row(row)]
-    # Extra filters / notes if present
     playstyle = _pick(row, "Playstyle", "Play Style")
     roster    = _pick(row, "Roster", "Roster Type", "Roster Policy")
     filters   = _pick(row, "Filters used", "Filters", "Filter")
@@ -192,14 +238,11 @@ def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.
     if filters:   bullet.append(f"Filters used: {filters}")
     if playstyle: bullet.append(f"Playstyle: {playstyle}")
     if roster:    bullet.append(f"Roster: {roster}")
-    if bullet:
-        desc_lines.append("\n".join(bullet))
-    if notes:
-        desc_lines.append(notes)
+    if bullet:    desc_lines.append("\n".join(bullet))
+    if notes:     desc_lines.append(notes)
 
     embed = discord.Embed(title=title, description="\n\n".join(desc_lines), color=discord.Color.blurple())
 
-    # Thumbnail (emoji name/id or direct URL)
     thumb = str(_pick(row, "LogoUrl", "Logo", "ThumbUrl", "EmojiNameOrId", "Emoji", default="")).strip()
     if thumb:
         if thumb.startswith("http"):
@@ -212,11 +255,10 @@ def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.
                 emo = discord.utils.find(lambda e: e.name.lower()==thumb.lower(), guild.emojis)
             if emo: embed.set_thumbnail(url=emo.url)
 
-    # Footer hint
     embed.set_footer(text="React with 💡 for Clan Profile")
     return embed
 
-# ------------------- Commands (debug + test poster) -------------------
+# ------------------- Commands -------------------
 @bot.command(name="cmwhichsheet")
 async def cmwhichsheet(ctx):
     try:
@@ -232,9 +274,9 @@ async def cmchecksheet(ctx, tab: Optional[str] = None):
         sh = open_sheet_by_env()
         titles = [ws.title for ws in sh.worksheets()]
         try:
-            ws = get_ws(sh, tab)  # uses DEFAULT_TAB if tab is None
-            rows = len(ws.get_all_values()) - 1
-            return await ctx.reply(f"✅ Connected. Tab `{ws.title}` rows: **{rows}**")
+            ws = get_ws(sh, tab)
+            rows = read_records(ws)
+            return await ctx.reply(f"✅ Connected. Tab `{ws.title}` rows: **{len(rows)}**")
         except gspread.WorksheetNotFound:
             return await ctx.reply(f"⚠️ Connected, but tab `{tab or DEFAULT_TAB}` not found.\nAvailable: {', '.join(titles) or '—'}")
     except Exception as e:
@@ -246,19 +288,18 @@ async def cmdump(ctx, clan: str, tab: Optional[str] = None):
     try:
         sh = open_sheet_by_env()
         ws = get_ws(sh, tab)
-        rows = ws.get_all_records()
-        target = None
+        rows = read_records(ws)
         want = clan.strip().lower()
+        target = None
         for r in rows:
-            tag  = str(r.get("ClanTag", "")).strip().lower()
-            name = str(r.get("ClanName", "")).strip().lower()
+            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
+            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
             if want in (tag, name):
                 target = r; break
         if not target:
             return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
         pretty = json.dumps(target, indent=2, ensure_ascii=False)
-        if len(pretty) > 1900:
-            pretty = pretty[:1900] + "\n… (truncated)"
+        if len(pretty) > 1900: pretty = pretty[:1900] + "\n… (truncated)"
         await ctx.reply(f"```json\n{pretty}\n```")
     except gspread.WorksheetNotFound:
         await ctx.reply(f"⚠️ Tab `{tab or DEFAULT_TAB}` not found.")
@@ -271,12 +312,12 @@ async def cmformat(ctx, clan: str, tab: Optional[str] = None):
     try:
         sh = open_sheet_by_env()
         ws = get_ws(sh, tab)
-        rows = ws.get_all_records()
-        target = None
+        rows = read_records(ws)
         want = clan.strip().lower()
+        target = None
         for r in rows:
-            tag  = str(r.get("ClanTag", "")).strip().lower()
-            name = str(r.get("ClanName", "")).strip().lower()
+            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
+            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
             if want in (tag, name):
                 target = r; break
         if not target:
@@ -292,14 +333,14 @@ async def cmsearch(ctx, *, text: str):
     try:
         sh = open_sheet_by_env()
         ws = get_ws(sh, None)
-        rows = ws.get_all_records()
+        rows = read_records(ws)
         want = text.strip().lower()
         hits = []
         for r in rows:
-            tag  = str(r.get("ClanTag","")).strip()
-            name = str(r.get("ClanName","")).strip()
+            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip()
+            name = str(r.get("ClanName", r.get("Clan Name",""))).strip()
             if want in tag.lower() or want in name.lower():
-                level = _to_int_or_none(_pick(r,"Level","Lvl"))
+                level = _to_int_or_none(_pick(r,"Level","Lvl","Clan Level"))
                 spots = _to_int_or_none(_pick(r,"Spots","Open Spots","Open"))
                 hits.append(f"{name} ({tag}) · L{level or '?'} · spots {spots or '?'}")
         if not hits:
@@ -314,12 +355,12 @@ async def cmpost(ctx, clan: str, tab: Optional[str] = None):
     try:
         sh = open_sheet_by_env()
         ws = get_ws(sh, tab)
-        rows = ws.get_all_records()
-        target = None
+        rows = read_records(ws)
         want = clan.strip().lower()
+        target = None
         for r in rows:
-            tag  = str(r.get("ClanTag", "")).strip().lower()
-            name = str(r.get("ClanName", "")).strip().lower()
+            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
+            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
             if want in (tag, name):
                 target = r; break
         if not target:
