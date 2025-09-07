@@ -133,139 +133,6 @@ def playstyle_ok(cell_text: str, value: str | None) -> bool:
         return True
     return norm(value) in norm(cell_text)
 
-def parse_spots_num(cell_text: str) -> in_
-# bot_clanmatch_prefix.py
-# C1C-Matchmaker — panels, search, profiles, emoji padding, and reaction flip (💡)
-
-import os, json, time, asyncio, re, traceback, urllib.parse, io
-from collections import defaultdict
-
-import discord
-from discord.ext import commands
-from discord import InteractionResponded
-from discord.utils import get
-
-import gspread
-from google.oauth2.service_account import Credentials
-
-from aiohttp import web, ClientSession
-from PIL import Image  # Pillow
-
-# ------------------- boot/uptime -------------------
-START_TS = time.time()
-
-def _fmt_uptime():
-    secs = int(time.time() - START_TS)
-    h, r = divmod(secs, 3600)
-    m, s = divmod(r, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-# ------------------- ENV -------------------
-CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-
-# Public base URL for proxying padded emoji images
-BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
-
-# Padded-emoji tunables
-EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
-EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
-STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: no raw fallback
-
-if not CREDS_JSON:
-    print("[boot] GSPREAD_CREDENTIALS missing", flush=True)
-if not SHEET_ID:
-    print("[boot] GOOGLE_SHEET_ID missing", flush=True)
-print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
-print(f"[boot] BASE_URL={BASE_URL}", flush=True)
-
-# ------------------- Sheets (lazy + cache) -------------------
-_gc = None
-_ws = None
-_cache_rows = None
-_cache_time = 0.0
-CACHE_TTL = 60  # seconds
-
-def get_ws(force: bool = False):
-    """Connect to Google Sheets only when needed."""
-    global _gc, _ws
-    if force:
-        _ws = None
-    if _ws is not None:
-        return _ws
-    creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
-    _gc = gspread.authorize(creds)
-    _ws = _gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
-    print("[sheets] Connected to worksheet OK", flush=True)
-    return _ws
-
-def get_rows(force: bool = False):
-    """Return all rows with simple 60s cache."""
-    global _cache_rows, _cache_time
-    if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
-        ws = get_ws(False)
-        _cache_rows = ws.get_all_values()
-        _cache_time = time.time()
-    return _cache_rows
-
-def clear_cache():
-    global _cache_rows, _cache_time, _ws
-    _cache_rows = None
-    _cache_time = 0.0
-    _ws = None  # reconnect next time
-
-# ------------------- Column map (0-based) -------------------
-COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
-COL_F_PROGRESSION, COL_G_LEAD, COL_H_DEPUTIES = 5, 6, 7
-COL_I_CVC_TIER, COL_J_CVC_WINS, COL_K_SIEGE_TIER, COL_L_SIEGE_WINS = 8, 9, 10, 11
-COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14  # ranges text (not filters)
-
-# Filters P–U
-COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
-
-# Entry Criteria V–AB
-IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
-
-# AC / AD / AE add-ons
-IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
-
-# ------------------- Helpers -------------------
-def norm(s: str) -> str:
-    return (s or "").strip().upper()
-
-def is_header_row(row) -> bool:
-    """Detect and ignore header/label rows that look like CLAN/TAG/Spots."""
-    b = norm(row[COL_B_CLAN]) if len(row) > COL_B_CLAN else ""
-    c = norm(row[COL_C_TAG])  if len(row) > COL_C_TAG  else ""
-    e = norm(row[COL_E_SPOTS]) if len(row) > COL_E_SPOTS else ""
-    return b in {"CLAN", "CLAN NAME"} or c == "TAG" or e == "SPOTS"
-
-TOKEN_MAP = {
-    "EASY":"ESY","NORMAL":"NML","HARD":"HRD","BRUTAL":"BTL","NM":"NM","UNM":"UNM","ULTRA-NIGHTMARE":"UNM"
-}
-def map_token(choice: str) -> str:
-    c = norm(choice)
-    return TOKEN_MAP.get(c, c)
-
-def cell_has_diff(cell_text: str, token: str | None) -> bool:
-    if not token:
-        return True
-    t = map_token(token)
-    c = norm(cell_text)
-    return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
-
-def cell_equals_10(cell_text: str, expected: str | None) -> bool:
-    if expected is None:
-        return True
-    return (cell_text or "").strip() == expected  # exact 1/0
-
-def playstyle_ok(cell_text: str, value: str | None) -> bool:
-    if not value:
-        return True
-    return norm(value) in norm(cell_text)
-
 def parse_spots_num(cell_text: str) -> int:
     m = re.search(r"\d+", cell_text or "")
     return int(m.group()) if m else 0
@@ -438,6 +305,101 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
+
+# ----------- Multi-card paging helpers (for !clanmatch only) -----------
+def _page_embeds(rows, page_index, builder, filters_text, guild):
+    """Build up to PAGE_SIZE embeds for given page. Adds page info to last card."""
+    start = page_index * PAGE_SIZE
+    end = min(len(rows), start + PAGE_SIZE)
+    slice_ = rows[start:end]
+    embeds = [builder(r, filters_text, guild) for r in slice_]
+    if embeds:
+        total_pages = max(1, math.ceil(len(rows) / PAGE_SIZE))
+        page_info = f"Page {page_index + 1}/{total_pages} • {len(rows)} total"
+        last = embeds[-1]
+        ft = last.footer.text or ""
+        last.set_footer(text=f"{ft} • {page_info}" if ft else page_info)
+    return embeds
+
+class PagedResultsView(discord.ui.View):
+    """Prev/Next/Close pager; owner-locked."""
+    def __init__(self, *, author_id: int, rows, builder, filters_text: str, guild: discord.Guild | None, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.rows = rows
+        self.builder = builder
+        self.filters_text = filters_text
+        self.guild = guild
+        self.page = 0
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user and itx.user.id == self.author_id:
+            return True
+        try:
+            await itx.response.send_message("⚠️ Not your panel. Type **!clanmatch** to summon your own.", ephemeral=True)
+        except InteractionResponded:
+            try: await itx.followup.send("⚠️ Not your panel. Type **!clanmatch** to summon your own.", ephemeral=True)
+            except Exception: pass
+        return False
+
+    def _sync_buttons(self):
+        max_page = max(0, math.ceil(len(self.rows) / PAGE_SIZE) - 1)
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "pm_prev":
+                    child.disabled = (self.page <= 0)
+                elif child.custom_id == "pm_next":
+                    child.disabled = (self.page >= max_page)
+
+    async def _edit(self, itx: discord.Interaction):
+        self._sync_buttons()
+        embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+        try:
+            await itx.response.edit_message(embeds=embeds, view=self)
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, custom_id="pm_prev")
+    async def prev_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+        await self._edit(itx)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary, custom_id="pm_next")
+    async def next_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        max_page = max(0, math.ceil(len(self.rows) / PAGE_SIZE) - 1)
+        if self.page < max_page:
+            self.page += 1
+        await self._edit(itx)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="pm_close")
+    async def close_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+        if embeds:
+            last = embeds[-1]
+            ft = last.footer.text or ""
+            last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+        try:
+            await itx.response.edit_message(embeds=embeds, view=self)
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+    async def on_timeout(self):
+        try:
+            for child in self.children:
+                child.disabled = True
+            if self.message:
+                embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+                if embeds:
+                    last = embeds[-1]
+                    ft = last.footer.text or ""
+                    last.set_footer(text=f"{ft} • Expired" if ft else "Expired")
+                await self.message.edit(embeds=embeds, view=self)
+        except Exception:
+            pass
 
 # ------------------- Reaction flip registry -------------------
 REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel_id, filters}
@@ -646,19 +608,15 @@ class ClanMatchView(discord.ui.View):
         filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
         builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
-        # Send one message per row so 💡 can map 1:1
-        for r in matches:
-            embed = builder(r, filters_text, itx.guild)
-
-            # If it's a search-style card, let 💡 flip to profile
-            if self.embed_variant == "search":
+        # --- Behavior split ---
+        if self.embed_variant == "search":
+            # KEEP OLD BEHAVIOR so 💡 flip works: one message per result
+            for r in matches:
+                embed = builder(r, filters_text, itx.guild)
                 ft = embed.footer.text or ""
                 hint = "React with 💡 for Clan Profile"
                 embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
-
-            msg = await itx.followup.send(embed=embed)
-            # Add reaction + register when search variant (so flip works)
-            if self.embed_variant == "search":
+                msg = await itx.followup.send(embed=embed)
                 try: await msg.add_reaction("💡")
                 except Exception: pass
                 REACT_INDEX[msg.id] = {
@@ -668,6 +626,26 @@ class ClanMatchView(discord.ui.View):
                     "channel_id": msg.channel.id,
                     "filters": filters_text,
                 }
+            return
+
+        # --- New behavior for !clanmatch (classic): multi-embed one message, with pagination if > PAGE_SIZE ---
+        total = len(matches)
+        if total <= PAGE_SIZE:
+            embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+            await itx.followup.send(embeds=embeds)
+            return
+
+        view = PagedResultsView(
+            author_id=itx.user.id,
+            rows=matches,
+            builder=builder,
+            filters_text=filters_text,
+            guild=itx.guild,
+            timeout=300
+        )
+        embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+        sent = await itx.followup.send(embeds=embeds, view=view)
+        view.message = sent
 
 # ------------------- Commands: panels -------------------
 async def _safe_delete(message: discord.Message):
@@ -1068,5 +1046,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
