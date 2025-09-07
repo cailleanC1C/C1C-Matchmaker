@@ -332,6 +332,8 @@ class PagedResultsView(discord.ui.View):
         self.guild = guild
         self.page = 0
         self.message: discord.Message | None = None
+        self.results_message: discord.Message | None = None  # last results message we posted
+        self._active_view: discord.ui.View | None = None     # last pager view (if any) attached to results
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user and itx.user.id == self.author_id:
@@ -479,6 +481,80 @@ class ClanMatchView(discord.ui.View):
                         child.label = "Roster: Full only"
                         child.style = discord.ButtonStyle.primary
 
+    async def _maybe_refresh(self, itx: discord.Interaction):
+    """If we already have a results message for !clanmatch, refresh it after criteria changes."""
+    if self.embed_variant != "classic":
+        return
+    if not self.results_message:
+        return
+    # Re-run the same search logic used in the button to rebuild results in-place
+    try:
+        rows = get_rows(False)
+    except Exception as e:
+        # If Sheets broke, just ignore refresh
+        return
+
+    matches = []
+    for row in rows[1:]:
+        try:
+            if is_header_row(row):
+                continue
+            if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
+                spots_num = parse_spots_num(row[COL_E_SPOTS])
+                if self.roster_mode == "open" and spots_num <= 0:
+                    continue
+                if self.roster_mode == "full" and spots_num > 0:
+                    continue
+                matches.append(row)
+        except Exception:
+            continue
+
+    # If no matches, just wipe the old results message so it’s clear
+    if not matches:
+        try:
+            await self.results_message.edit(content="No matching clans with current filters. Adjust and I’ll update here.", embeds=[], view=None)
+        except Exception:
+            pass
+        return
+
+    filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
+    builder = make_embed_for_row_classic  # classic variant only
+
+    total = len(matches)
+    if total <= PAGE_SIZE:
+        # No pagination: update/replace embeds in the same message
+        embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+        # If there was a pager view before, drop it
+        self._active_view = None
+        try:
+            await self.results_message.edit(embeds=embeds, view=None)
+        except Exception:
+            # If edit failed (e.g., deleted), send a fresh one
+            sent = await itx.followup.send(embeds=embeds)
+            self.results_message = sent
+        return
+
+    # Paginated mode
+    view = PagedResultsView(
+        author_id=itx.user.id,
+        rows=matches,
+        builder=builder,
+        filters_text=filters_text,
+        guild=itx.guild,
+        timeout=300
+    )
+    embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+    try:
+        await self.results_message.edit(embeds=embeds, view=view)
+        self._active_view = view
+        view.message = self.results_message
+    except Exception:
+        sent = await itx.followup.send(embeds=embeds, view=view)
+        self.results_message = sent
+        self._active_view = view
+        view.message = sent
+
+
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.author_id:
             cmd = "!clansearch" if self.spawn_cmd == "search" else "!clanmatch"
@@ -500,6 +576,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
                        options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
@@ -509,6 +586,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
                        options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
@@ -518,6 +596,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
                        options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
@@ -527,6 +606,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     # Row 4: buttons
     def _cycle(self, current):
@@ -541,6 +621,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Siege: —", style=discord.ButtonStyle.secondary, row=4)
     async def toggle_siege(self, itx: discord.Interaction, button: discord.ui.Button):
@@ -548,6 +629,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
                 await itx.followup.edit_message(message_id=itx.message.id, view=self)
+                await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
@@ -562,6 +644,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
+            await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -572,6 +655,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
+            await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -628,24 +712,50 @@ class ClanMatchView(discord.ui.View):
                 }
             return
 
-        # --- New behavior for !clanmatch (classic): multi-embed one message, with pagination if > PAGE_SIZE ---
-        total = len(matches)
-        if total <= PAGE_SIZE:
-            embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-            await itx.followup.send(embeds=embeds)
-            return
+# --- New behavior for !clanmatch (classic): multi-embed one message, with pagination if > PAGE_SIZE ---
+total = len(matches)
+if total <= PAGE_SIZE:
+    embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+    # If there was a pager previously, drop it now
+    self._active_view = None
+    if self.results_message:
+        try:
+            await self.results_message.edit(embeds=embeds, view=None)
+        except Exception:
+            sent = await itx.followup.send(embeds=embeds)
+            self.results_message = sent
+    else:
+        sent = await itx.followup.send(embeds=embeds)
+        self.results_message = sent
+    return
 
-        view = PagedResultsView(
-            author_id=itx.user.id,
-            rows=matches,
-            builder=builder,
-            filters_text=filters_text,
-            guild=itx.guild,
-            timeout=300
-        )
-        embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+# Paginated mode
+view = PagedResultsView(
+    author_id=itx.user.id,
+    rows=matches,
+    builder=builder,
+    filters_text=filters_text,
+    guild=itx.guild,
+    timeout=300
+)
+embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+
+if self.results_message:
+    try:
+        await self.results_message.edit(embeds=embeds, view=view)
+        self._active_view = view
+        view.message = self.results_message
+    except Exception:
         sent = await itx.followup.send(embeds=embeds, view=view)
+        self.results_message = sent
+        self._active_view = view
         view.message = sent
+else:
+    sent = await itx.followup.send(embeds=embeds, view=view)
+    self.results_message = sent
+    self._active_view = view
+    view.message = sent
+
 
 # ------------------- Commands: panels -------------------
 async def _safe_delete(message: discord.Message):
@@ -1046,3 +1156,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
