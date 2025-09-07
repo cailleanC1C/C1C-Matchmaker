@@ -1160,6 +1160,9 @@ async def emoji_pad_handler(request: web.Request):
 async def start_webserver():
     app = web.Application()
     app["session"] = ClientSession()
+    async def _close_session(app):
+        await app["session"].close()
+    app.on_cleanup.append(_close_session)
     app.router.add_get("/", _health_http)
     app.router.add_get("/health", _health_http)
     app.router.add_get("/emoji-pad", emoji_pad_handler)
@@ -1169,6 +1172,7 @@ async def start_webserver():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"[keepalive] HTTP server listening on :{port}", flush=True)
+
 
 # ------------------- Boot both -------------------
 async def main():
@@ -1186,6 +1190,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
