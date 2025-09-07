@@ -734,19 +734,23 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
             await self._maybe_refresh(itx)
 
-    @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
-    async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
-            await itx.response.send_message("Pick at least **one** filter, then try again. 🙂")
-            return
+@discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4)
+async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
+    # Require at least one criterion
+    if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
+        await itx.response.send_message("Pick at least **one** filter, then try again. 🙂", ephemeral=True)
+        return
 
-        await itx.response.defer(thinking=True)  # public results
-        try:
-            rows = get_rows(False)
-        except Exception as e:
-            await itx.followup.send(f"❌ Failed to read sheet: {e}")
-            return
+    # Defer so Discord shows the spinner; we MUST follow up later to finish.
+    await itx.response.defer(thinking=True)
 
+    responded = False  # track whether we've sent any followup
+
+    try:
+        # 1) Fetch rows
+        rows = get_rows(False)
+
+        # 2) Filter
         matches = []
         for row in rows[1:]:
             try:
@@ -763,13 +767,17 @@ class ClanMatchView(discord.ui.View):
                 continue
 
         if not matches:
-            await itx.followup.send("No matching clans found. Try a different combo.")
+            await itx.followup.send("No matching clans found. Try a different combo.", ephemeral=False)
+            responded = True
             return
 
-        filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
+        # 3) Build output
+        filters_text = format_filters_footer(
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+        )
         builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
-        # --- KEEP OLD BEHAVIOR for !clansearch (per-card messages + 💡 flip) ---
+        # 4) !clansearch = keep old per-card posts (for 💡 flip)
         if self.embed_variant == "search":
             for r in matches:
                 embed = builder(r, filters_text, itx.guild)
@@ -777,6 +785,7 @@ class ClanMatchView(discord.ui.View):
                 hint = "React with 💡 for Clan Profile"
                 embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
                 msg = await itx.followup.send(embed=embed)
+                responded = True
                 try:
                     await msg.add_reaction("💡")
                 except Exception:
@@ -790,7 +799,7 @@ class ClanMatchView(discord.ui.View):
                 }
             return
 
-        # --- NEW BEHAVIOR for !clanmatch (classic): one message, multi-embed or paginated ---
+        # 5) !clanmatch = one message (multi-embed) or paginated
         total = len(matches)
         if total <= PAGE_SIZE:
             embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
@@ -798,14 +807,19 @@ class ClanMatchView(discord.ui.View):
             if self.results_message:
                 try:
                     await self.results_message.edit(embeds=embeds, view=None)
+                    await itx.followup.send("Results updated.", ephemeral=True)
+                    responded = True
                 except Exception:
                     sent = await itx.followup.send(embeds=embeds)
+                    responded = True
                     self.results_message = sent
             else:
                 sent = await itx.followup.send(embeds=embeds)
+                responded = True
                 self.results_message = sent
             return
 
+        # Paginated path
         view = PagedResultsView(
             author_id=itx.user.id,
             rows=matches,
@@ -821,16 +835,31 @@ class ClanMatchView(discord.ui.View):
                 await self.results_message.edit(embeds=embeds, view=view)
                 self._active_view = view
                 view.message = self.results_message
+                await itx.followup.send("Results updated.", ephemeral=True)
+                responded = True
             except Exception:
                 sent = await itx.followup.send(embeds=embeds, view=view)
+                responded = True
                 self.results_message = sent
                 self._active_view = view
                 view.message = sent
         else:
             sent = await itx.followup.send(embeds=embeds, view=view)
+            responded = True
             self.results_message = sent
             self._active_view = view
             view.message = sent
+
+    except Exception as e:
+        # Last-resort: make sure the deferred interaction is closed
+        if not responded:
+            try:
+                await itx.followup.send(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
+                responded = True
+            except Exception:
+                # If even followup fails, nothing else we can do here
+                pass
+
 
 
 # ------------------- Commands: panels -------------------
@@ -1232,6 +1261,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
