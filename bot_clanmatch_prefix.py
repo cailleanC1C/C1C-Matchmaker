@@ -53,6 +53,24 @@ LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
 COOLDOWN_SEC = 2.0
 
+@bot.command(name="ping")
+async def ping_cmd(ctx: commands.Context):
+    beat = round(bot.latency * 1000)
+    secs = int(time.time() - START_TS)
+    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
+    await ctx.reply(f"Pong! `{beat}ms` • up `{uptime}`", mention_author=False)
+
+@bot.command(name="health")
+async def health_cmd(ctx: commands.Context):
+    try:
+        ws = get_ws(False); _ = ws.row_values(1)
+        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+    except Exception as e:
+        sheets_status = f"ERROR: {e}"
+    secs = int(time.time() - START_TS)
+    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
+    await ctx.reply(f"Matchmaker up `{uptime}` • Sheets: {sheets_status}", mention_author=False)
+
 @bot.event
 async def on_ready():
     try:
@@ -208,6 +226,21 @@ def padded_emoji_url(guild: discord.Guild | None, tag: str | None, size: int | N
     q = urllib.parse.urlencode({"u": src, "s": str(size), "box": str(box), "v": str(emj.id)})
     return f"{base.rstrip('/')}/emoji-pad?{q}"
 
+def resolve_thumb_url(guild: discord.Guild | None, tag: str | None) -> str | None:
+    """
+    If STRICT_EMOJI_PROXY=1 and a proxy BASE_URL exists → use padded.
+    Otherwise → use the raw emoji URL so the icon always shows.
+    """
+    emj = emoji_for_tag(guild, tag)
+    if not emj:
+        return None
+    raw = str(emj.url)
+    if STRICT_EMOJI_PROXY:
+        padded = padded_emoji_url(guild, tag)
+        return padded or None
+    return raw
+
+
 # ------------------- Discord bot state -------------------
 def _cooldown_ok(user_id: int) -> bool:
     now = time.time()
@@ -241,31 +274,34 @@ def panel_intro(spawn_cmd: str, owner_mention: str, private: bool = False) -> st
     return "\n".join(lines)
 
 def build_entry_criteria_classic(row) -> str:
-    NBSP_PIPE = "\u00A0|\u00A0"
-    parts = []
-    v  = (row[IDX_V]  or "").strip()
-    w  = (row[IDX_W]  or "").strip()
-    x  = (row[IDX_X]  or "").strip()
-    y  = (row[IDX_Y]  or "").strip()
-    z  = (row[IDX_Z]  or "").strip()
-    aa = (row[IDX_AA] or "").strip()
-    ab = (row[IDX_AB] or "").strip()
-    if v:  parts.append(f"Clan Boss: {v}")
-    if w:  parts.append(f"Hydra: {w}")
-    if x:  parts.append(f"Chimera: {x}")
-    if y:  parts.append(f"CvC: {y}")
-    if z:  parts.append(f"Siege: {z}")
-    if aa: parts.append(f"Playstyle: {aa}")
-    if ab: parts.append(f"Roster: {ab}")
-    lines = [NBSP_PIPE.join(parts)] if parts else ["—"]
-    add = []
-    req = (row[IDX_AE_REQUIREMENTS] or "").strip()
-    comments = (row[IDX_AD_COMMENTS] or "").strip()
-    if req:      add.append(f"Requirements: {req}")
-    if comments: add.append(f"Notes: {comments}")
-    if add:
-        lines.append("\n".join(add))
+    """
+    Build the 'Entry Criteria' block using the sheet's headers (V..AB),
+    so labels match the tab exactly. Appends Requirements/Notes if present.
+    """
+    rows = get_rows(False)
+    headers = rows[0] if rows and len(rows) > 0 else []
+
+    lines = ["**Entry Criteria:**"]
+    for idx in range(IDX_V, IDX_AB + 1):
+        val = (row[idx] if idx < len(row) else "") or ""
+        val = val.strip()
+        if not val:
+            continue
+        label = ((headers[idx] if idx < len(headers) else "") or "").strip()
+        if label:
+            lines.append(f"{label}: {val}")
+        else:
+            lines.append(val)
+
+    req = (row[IDX_AE_REQUIREMENTS] if len(row) > IDX_AE_REQUIREMENTS else "") or ""
+    comments = (row[IDX_AD_COMMENTS] if len(row) > IDX_AD_COMMENTS else "") or ""
+    if req.strip():
+        lines.append(f"Requirements: {req.strip()}")
+    if comments.strip():
+        lines.append(f"Notes: {comments.strip()}")
+
     return "\n".join(lines)
+
 
 def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild) -> discord.Embed:
     clan = (row[COL_B_CLAN] or "").strip() or "—"
@@ -301,13 +337,9 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild) -> 
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
     # resilient thumbnail: padded → raw fallback
-    thumb = padded_emoji_url(guild, tag)
-    if not thumb:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            thumb = str(em.url)
-    if thumb:
-        e.set_thumbnail(url=thumb)
+    thumb = resolve_thumb_url(guild, tag)
+if thumb:
+    e.set_thumbnail(url=thumb)
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
@@ -334,12 +366,10 @@ def make_embed_for_row_search(row, _filters_text: str, guild: discord.Guild) -> 
 
     # resilient thumbnail: padded → raw fallback
     thumb = padded_emoji_url(guild, tag)
-    if not thumb:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            thumb = str(em.url)
-    if thumb:
-        e.set_thumbnail(url=thumb)
+    thumb = resolve_thumb_url(guild, tag)
+if thumb:
+    e.set_thumbnail(url=thumb)
+
 
     # hint so 💡 can flip to Entry Criteria
     e.set_footer(text="React with 💡 for Entry Criteria")
@@ -375,12 +405,9 @@ def make_embed_for_profile(row, _filters_text: str, guild: discord.Guild) -> dis
     e = discord.Embed(title=title, description="\n".join(parts))
 
     thumb = padded_emoji_url(guild, tag)
-    if not thumb:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            thumb = str(em.url)
-    if thumb:
-        e.set_thumbnail(url=thumb)
+    thumb = resolve_thumb_url(guild, tag)
+if thumb:
+    e.set_thumbnail(url=thumb)
 
     e.set_footer(text="React with 💡 to flip back to Entry Criteria")
     return e
@@ -869,3 +896,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
