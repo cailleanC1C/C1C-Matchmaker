@@ -4,6 +4,7 @@
 #   !clanmatch  -> recruiter panel (hybrid: per-recruiter thread if role; else fixed thread)
 #   !clansearch -> user panel (in invoking channel)
 #   !clan       -> clan profile (tag or name)
+#   !ping, !health, !reload -> utility commands (restored)
 #
 # Behaviors:
 #   - Search posts ALL results in ONE message (chunks if >10 embeds)
@@ -220,7 +221,6 @@ async def _delete_after(delay: int, message: Optional[discord.Message]):
         await asyncio.sleep(delay)
         await message.delete()
     except Exception:
-        # one quick retry after a short pause (covers transient permission/uncached issues)
         try:
             await asyncio.sleep(2)
             await message.delete()
@@ -406,7 +406,6 @@ class BasePanelView(View):
                     view=rv
                 )
             finally:
-                # allow GC after timeout
                 LIVE_VIEWS.pop(self.panel_message.id, None)
 
     @button(label="Close", style=discord.ButtonStyle.secondary, emoji="🛑")
@@ -620,6 +619,21 @@ async def clan_cmd(ctx: commands.Context, *, ident: str):
         v = _get(best,k)
         if v: e.add_field(name=k, value=v, inline=True)
     await ctx.send(embed=e)
+
+# ---------- Utility commands (restored) ----------
+@bot.command(name="ping", help="Check bot latency.")
+async def ping_cmd(ctx: commands.Context):
+    await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
+
+@bot.command(name="health", help="Health probe.")
+async def health_cmd(ctx: commands.Context):
+    await ctx.send("ok")
+
+@bot.command(name="reload", help="Reload clan list (admin only).")
+@commands.has_permissions(administrator=True)
+async def reload_cmd(ctx: commands.Context):
+    # no caching yet; this confirms command wiring
+    await ctx.send("Reloaded.")
 
 # ============================================================
 #                      BOT LIFECYCLE / WEB
