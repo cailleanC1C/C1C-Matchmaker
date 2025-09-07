@@ -1,4 +1,4 @@
-# C1C Matchmaker — bot_clanmatch_prefix.py (robust lookup edition)
+# C1C Matchmaker — bot_clanmatch_prefix.py
 # Env vars:
 #   GSHEET_ID | GOOGLE_SHEET_ID | CONFIG_SHEET_ID
 #   GOOGLE_SERVICE_ACCOUNT_JSON | SERVICE_ACCOUNT_JSON
@@ -47,8 +47,8 @@ def resolve_emoji_text(guild: _discord.Guild, value: _Optional[str], fallback: _
     e = _discord.utils.find(lambda x: x.name.lower()==v.lower(), guild.emojis)
     return str(e) if e else v
 
-# Channel / thread formatter
-async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target_id: int | None) -> str:
+# Channel / thread formatter for human admins
+async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target_id: Optional[int]) -> str:
     if not target_id: return "—"
     obj = guild.get_channel(target_id) or await bot.fetch_channel(target_id)
     if not obj: return f"(unknown) `{target_id}`"
@@ -71,7 +71,7 @@ def open_sheet_by_env():
     sid = (os.getenv("GSHEET_ID") or os.getenv("GOOGLE_SHEET_ID") or os.getenv("CONFIG_SHEET_ID"))
     if not sid:
         raise RuntimeError("Set GSHEET_ID (or GOOGLE_SHEET_ID / CONFIG_SHEET_ID).")
-    import gspread
+    import gspread  # local import for clarity
     return gs_client().open_by_key(sid)
 # ============================================================================
 
@@ -84,7 +84,7 @@ UTC = timezone.utc
 log = c1c_get_logger("c1c.clanmatch")
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-DEFAULT_TAB   = os.getenv("C1C_MATCH_TAB", "bot_info")  # default worksheet/tab
+DEFAULT_TAB   = os.getenv("C1C_MATCH_TAB", "bot_info")  # default worksheet/tab (case-insensitive)
 
 # ------------------- tiny web (Render health) -------------------
 async def _health(_): return web.Response(text="ok")
@@ -102,7 +102,7 @@ intents = c1c_make_intents()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("help")
 
-# ------------------- Sheet utilities (robust table reader) -------------------
+# ------------------- Sheet utilities (robust reader) -------------------
 def get_ws(sh, name: Optional[str]):
     """Return worksheet by name, case-insensitive. Uses DEFAULT_TAB if None/empty."""
     wanted = (name or DEFAULT_TAB).strip()
@@ -164,7 +164,7 @@ def read_records(ws) -> List[Dict[str, str]]:
 
 # ------------------- Flexible field matching -------------------
 TAG_HINTS  = ("clantag", "clan tag", "tag", "abbr", "abbrev", "short", "ticker", "code", "id")
-NAME_HINTS = ("clanname", "clan name", "name")  # avoid catching "tag" here
+NAME_HINTS = ("clanname", "clan name", "name")  # avoid false positives with "tag"
 
 def norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
@@ -181,7 +181,7 @@ def name_keys_in(headers: List[str]) -> List[str]:
     out=[]
     for h in headers:
         hl=h.strip().lower()
-        if ("name" in hl) and ("tag" not in hl):  # keep names, not tags
+        if ("name" in hl) and ("tag" not in hl):
             out.append(h)
     return out
 
@@ -295,18 +295,7 @@ def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.
     embed.set_footer(text="React with 💡 for Clan Profile")
     return embed
 
-# ------------------- Commands -------------------
-@bot.command(name="cmheaders")
-async def cmheaders(ctx, tab: Optional[str] = None):
-    """Show the headers the bot sees (after cleaning)."""
-    try:
-        sh = open_sheet_by_env()
-        ws = get_ws(sh, tab)
-        headers = get_headers(ws)
-        await ctx.reply("Headers in `" + ws.title + "`:\n" + ", ".join(headers))
-    except Exception as e:
-        await ctx.reply(f"❌ Headers failed: `{type(e).__name__}: {e}`")
-
+# ------------------- Debug / utility commands -------------------
 @bot.command(name="cmwhichsheet")
 async def cmwhichsheet(ctx):
     try:
@@ -315,6 +304,16 @@ async def cmwhichsheet(ctx):
         await ctx.reply(f"✅ Connected to sheet `{sh.id}`.\nTabs: {tabs}\nDefault tab: `{DEFAULT_TAB}`")
     except Exception as e:
         await ctx.reply(f"❌ Sheet connect failed: `{type(e).__name__}: {e}`")
+
+@bot.command(name="cmheaders")
+async def cmheaders(ctx, tab: Optional[str] = None):
+    try:
+        sh = open_sheet_by_env()
+        ws = get_ws(sh, tab)
+        headers = get_headers(ws)
+        await ctx.reply("Headers in `" + ws.title + "`:\n" + ", ".join(headers))
+    except Exception as e:
+        await ctx.reply(f"❌ Headers failed: `{type(e).__name__}: {e}`")
 
 @bot.command(name="cmchecksheet")
 async def cmchecksheet(ctx, tab: Optional[str] = None):
@@ -369,7 +368,7 @@ async def cmformat(ctx, clan: str, tab: Optional[str] = None):
 
 @bot.command(name="cmsearch")
 async def cmsearch(ctx, *, text: str):
-    """Quick search by name or tag in DEFAULT_TAB (bot_info unless overridden)."""
+    """Quick list (non-panel) search in DEFAULT_TAB."""
     try:
         sh = open_sheet_by_env()
         ws = get_ws(sh, None)
@@ -379,12 +378,11 @@ async def cmsearch(ctx, *, text: str):
         want = norm(text)
         hits = []
         for r in rows:
-            cand = []
+            cand = False
             for k in (tkeys + nkeys):
                 val = str(r.get(k,"")).strip()
-                if not val: continue
                 if want in norm(val):
-                    cand.append(val)
+                    cand = True; break
             if cand:
                 level = _to_int_or_none(_pick(r,"Level","Lvl","Clan Level"))
                 spots = _to_int_or_none(_pick(r,"Spots","Open Spots","Open"))
@@ -415,6 +413,117 @@ async def cmpost(ctx, clan: str, tab: Optional[str] = None):
     except Exception as e:
         await ctx.reply(f"❌ Post failed: `{type(e).__name__}: {e}`")
 
+# ==================== PANEL SEARCH / MATCH (restored UX) ====================
+def _search_hits(sh, tab: Optional[str], text: str, limit: int = 50):
+    """Return (ws, all_rows, matching_rows). If text is empty → show 'open' clans first."""
+    ws = get_ws(sh, tab)
+    rows = read_records(ws)
+    if not rows:
+        return ws, rows, []
+    headers = list(rows[0].keys())
+    tkeys, nkeys = tag_keys_in(headers), name_keys_in(headers)
+    want = norm(text)
+
+    hits: List[dict] = []
+    if want:
+        for r in rows:
+            hay = False
+            for k in (tkeys + nkeys):
+                if want in norm(str(r.get(k, ""))):
+                    hay = True; break
+            if hay:
+                hits.append(r)
+                if len(hits) >= limit: break
+    else:
+        def is_open(r):
+            spots = _to_int_or_none(_pick(r, "Spots", "Open Spots", "Open", "OpenSlots"))
+            if spots is not None:
+                return spots > 0
+            return _boolish(_pick(r, "Open", "Status", "Recruitment", default="open"), default=True)
+        for r in rows:
+            if is_open(r):
+                hits.append(r)
+                if len(hits) >= limit: break
+        if not hits:
+            hits = rows[:min(limit, len(rows))]
+
+    return ws, rows, hits
+
+class ClanSearchView(discord.ui.View):
+    """Interactive browser: Prev / Next / Post / Close."""
+    def __init__(self, ctx: commands.Context, hits: List[dict]):
+        super().__init__(timeout=300)
+        self.ctx = ctx
+        self.hits = hits
+        self.i = 0
+        self.message: Optional[discord.Message] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the command author can use these controls.", ephemeral=True)
+            return False
+        return True
+
+    def current(self) -> dict:
+        return self.hits[self.i]
+
+    async def refresh(self, interaction: Optional[discord.Interaction] = None):
+        embed = build_clan_embed(self.current(), self.ctx.guild)
+        pos = f"Result {self.i+1}/{len(self.hits)}"
+        ft = (embed.footer.text if embed.footer else "") or ""
+        embed.set_footer(text=(ft + (" • " if ft else "") + pos))
+        if interaction:
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await self.message.edit(embed=embed, view=self)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.i = (self.i - 1) % len(self.hits)
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.i = (self.i + 1) % len(self.hits)
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="📬 Post Here", style=discord.ButtonStyle.primary)
+    async def post_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        try:
+            emb = build_clan_embed(self.current(), self.ctx.guild)
+            allow = discord.AllowedMentions(everyone=False, roles=False, users=False)
+            await self.ctx.channel.send(embed=emb, allowed_mentions=allow)
+            await interaction.response.send_message("Posted ✅", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Post failed: `{type(e).__name__}: {e}`", ephemeral=True)
+
+    @discord.ui.button(label="✖ Close", style=discord.ButtonStyle.danger)
+    async def close_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+@bot.command(name="clansearch")
+async def clansearch_cmd(ctx: commands.Context, *, text: str = ""):
+    """Open the interactive search panel. Empty text → show open clans."""
+    try:
+        sh = open_sheet_by_env()
+        _ws, _rows, hits = _search_hits(sh, None, text, limit=50)
+        if not hits:
+            return await ctx.reply("No matches. Try a different tag/name.")
+        view = ClanSearchView(ctx, hits)
+        embed = build_clan_embed(hits[0], ctx.guild)
+        msg = await ctx.send(content=(f"Results for **{text}**" if text else "Open clans"), embed=embed, view=view)
+        view.message = msg
+    except Exception as e:
+        await ctx.reply(f"❌ Search failed: `{type(e).__name__}: {e}`")
+
+@bot.command(name="clanmatch")
+async def clanmatch_cmd(ctx: commands.Context, *, text: str = ""):
+    """Legacy entry point. Same panel as !clansearch."""
+    await clansearch_cmd(ctx, text=text)
+# ================== end panel search / match block ==================
+
 # ---------- Compat shims + help ----------
 from discord.ext.commands import CommandNotFound
 
@@ -423,8 +532,9 @@ async def help_cmd(ctx):
     await ctx.reply(
         "**C1C Matchmaker — Commands**\n"
         "`!clan <tag|name>` → post one card (alias of `!cmpost`)\n"
-        "`!clansearch <text>` → search clans (alias of `!cmsearch`)\n"
-        "`!cmpost <tag|name> [tab]` · `!cmsearch <text>`\n"
+        "`!clanmatch [text]` → interactive browser panel\n"
+        "`!clansearch [text]` → interactive browser panel\n"
+        "`!cmpost <tag|name> [tab]` · `!cmsearch <text>` (list)\n"
         "`!cmdump <tag|name> [tab]` · `!cmformat <tag|name> [tab]`\n"
         "`!cmwhichsheet` · `!cmchecksheet [tab]` · `!cmheaders [tab]`\n"
         f"(Default tab: `{DEFAULT_TAB}` — change via env `C1C_MATCH_TAB`)"
@@ -434,23 +544,10 @@ async def help_cmd(ctx):
 async def clan_cmd(ctx, *, query: str = ""):
     if not query.strip():
         return await ctx.reply("Usage: `!clan <tag|name>` — posts one card. See `!help`.")
-    # use default tab (bot_info unless overridden)
     await cmpost(ctx, query, None)
-
-@bot.command(name="clanmatch")
-async def clanmatch_cmd(ctx, *, query: str = ""):
-    # same behavior as !clan
-    await clan_cmd(ctx, query=query)
-
-@bot.command(name="clansearch")
-async def clansearch_cmd(ctx, *, text: str = ""):
-    if not text.strip():
-        return await ctx.reply("Usage: `!clansearch <text>` — finds matching clans. See `!help`.")
-    await cmsearch(ctx, text=text)
 
 @bot.event
 async def on_command_error(ctx, error):
-    # friendlier UX than silent failure
     if isinstance(error, CommandNotFound):
         return await ctx.reply("❓ Unknown command. Try `!help`.")
     try:
@@ -458,7 +555,6 @@ async def on_command_error(ctx, error):
     finally:
         log.exception("Command error", exc_info=error)
 # ---------- end compat ----------
-
 
 # ------------------- On Ready -------------------
 @bot.event
@@ -472,3 +568,4 @@ async def _main():
 
 if __name__ == "__main__":
     asyncio.run(_main())
+
