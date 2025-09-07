@@ -375,7 +375,7 @@ COOLDOWN_SEC = 2.0
 CB_CHOICES        = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_CHOICES     = ["Normal", "Hard", "Brutal", "NM"]
 CHIMERA_CHOICES   = ["Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
-PLAYSTYLE_CHOICES = ["stress-free", "Casual", "Semi Competitive", "Competitive"]
+PLAYSTYLE_CHOICES = ["stress-free", "Casual", "SemiCompetitive", "Competitive"]
 
 class ClanMatchView(discord.ui.View):
     """4 selects + one row of buttons (CvC, Siege, Roster, Reset, Search)."""
