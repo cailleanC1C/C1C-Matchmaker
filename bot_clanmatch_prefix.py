@@ -15,6 +15,17 @@ from google.oauth2.service_account import Credentials
 from aiohttp import web, ClientSession
 from PIL import Image  # Pillow
 
+import json, time, os
+import requests
+from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError, WorksheetNotFound
+
+# Replace/ensure SCOPES include spreadsheets & drive read:
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
 
@@ -52,6 +63,15 @@ _cache_rows = None
 _cache_time = 0.0
 CACHE_TTL = 60  # seconds
 
+def _build_creds():
+    return Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+
+def _get_bearer_token():
+    creds = _build_creds()
+    creds.refresh(requests.Request())  # requests.Request works fine for token refresh context
+    return creds.token
+
+
 def get_ws(force: bool = False):
     """Connect to Google Sheets only when needed."""
     global _gc, _ws
@@ -79,6 +99,31 @@ def clear_cache():
     _cache_rows = None
     _cache_time = 0.0
     _ws = None  # reconnect next time
+
+def _sheets_values_get(sheet_id: str, tab: str):
+    """Read values via Sheets HTTP API v4 — no googleapiclient needed."""
+    token = _get_bearer_token()
+    rng = f"{tab}!A1:ZZ9999"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{requests.utils.quote(rng, safe='!')}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Sheets values.get failed: {r.status_code} {r.text[:180]}")
+    data = r.json()
+    return data.get("values", []) or []
+
+def _sheets_list_tabs(sheet_id: str):
+    """List sheet (tab) titles via spreadsheets.get"""
+    token = _get_bearer_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?includeGridData=false"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Sheets meta get failed: {r.status_code} {r.text[:180]}")
+    meta = r.json()
+    tabs = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    title = meta.get("properties", {}).get("title", "(untitled)")
+    return title, tabs
+
+
 
 # ------------------- Column map (0-based) -------------------
 COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
@@ -589,6 +634,23 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
 
+@bot.command(name="sheetdiag")
+@commands.has_permissions(administrator=True)
+async def sheetdiag(ctx):
+    try:
+        # force fresh read
+        rows = get_rows(force=True)
+        title, tabs = _sheets_list_tabs(SHEET_ID)
+        msg = [
+            f"Spreadsheet: {title}",
+            f"Tabs: {', '.join(tabs) or '(none)'}",
+            f"Target tab: {WORKSHEET_NAME}",
+            f"Row count: {len(rows)}",
+        ]
+        await ctx.reply("```\n" + "\n".join(msg) + "\n```")
+    except Exception as e:
+        await ctx.reply(f"```diag error: {e}```")
+
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
@@ -932,4 +994,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
