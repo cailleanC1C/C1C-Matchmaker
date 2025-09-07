@@ -635,6 +635,53 @@ async def reload_cmd(ctx: commands.Context):
     # no caching yet; this confirms command wiring
     await ctx.send("Reloaded.")
 
+# ---------- Friendly error messages (UI-side) ----------
+from discord.ext import commands
+import discord
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    # unwrap CommandInvokeError to the original
+    original = getattr(error, "original", error)
+
+    # 1) Unknown command -> short hint (keep chat clean but not silent)
+    if isinstance(error, commands.CommandNotFound):
+        return await ctx.send("Unknown command. Try `!help`.")
+
+    # 2) Missing required args (e.g., `!clan` without a tag/name)
+    if isinstance(error, commands.MissingRequiredArgument):
+        if ctx.command and ctx.command.name == "clan":
+            return await ctx.send("Usage: `!clan <tag|name>`")
+        # generic fallback
+        return await ctx.send(f"Missing parameter. Usage: `!{ctx.command.qualified_name} {ctx.command.signature}`")
+
+    # 3) Cooldowns/checks
+    if isinstance(error, commands.CheckFailure):
+        return await ctx.send("You don't have permission to do that here.")
+    if isinstance(error, commands.CommandOnCooldown):
+        return await ctx.send(f"Slow down. Try again in {error.retry_after:.1f}s.")
+
+    # 4) Discord permission problems (very common when posting embeds/panels/threads)
+    if isinstance(original, discord.Forbidden):
+        return await ctx.send(
+            "I can’t do that here. Please give me **Send Messages**, **Embed Links**, "
+            "**Send Messages in Threads**, **Create Public Threads**, and **Manage Messages** "
+            "in this channel/thread."
+        )
+
+    # 5) Message too long / bad request
+    if isinstance(original, discord.HTTPException):
+        # 400-range errors often mean payload too big / invalid; keep it generic
+        return await ctx.send("That didn’t work due to a Discord error. Try again or tweak your filters.")
+
+    # 6) Anything else → short note for the user, full details to logs
+    try:
+        cmd_name = getattr(ctx.command, "qualified_name", "unknown")
+        log.exception("Unhandled error in command %s", cmd_name, exc_info=original)
+    except Exception:
+        pass
+    await ctx.send("Something went wrong. I’ve logged the details.")
+
 # ============================================================
 #                      BOT LIFECYCLE / WEB
 # ============================================================
