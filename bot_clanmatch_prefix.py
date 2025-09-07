@@ -659,6 +659,54 @@ async def reload_cmd(ctx: commands.Context):
     # no caching yet; this confirms wiring
     await ctx.send("Reloaded.")
 
+@bot.command(name="gsdiag", help="Admin-only: diagnose Google Sheets connectivity.")
+@commands.has_permissions(administrator=True)
+async def gsdiag_cmd(ctx: commands.Context):
+    try:
+        import gspread
+        from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError
+        from google.oauth2.service_account import Credentials
+        import json
+
+        # show what the bot *thinks* the worksheet name is
+        worksheet_name = (
+            os.environ.get("CLANS_WORKSHEET_NAME")
+            or os.environ.get("WORKSHEET_NAME")
+            or "bot_info"
+        )
+
+        creds_info = json.loads(os.environ["GSPREAD_CREDENTIALS"])
+        client_email = creds_info.get("client_email", "<no-client-email>")
+        creds = Credentials.from_service_account_info(
+            creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        gc = gspread.authorize(creds)
+
+        sh = gc.open_by_key(os.environ["GOOGLE_SHEET_ID"])
+        try:
+            ws = sh.worksheet(worksheet_name)
+        except WorksheetNotFound:
+            return await ctx.send(f"❌ Worksheet not found: `{worksheet_name}`. Tabs: {[w.title for w in sh.worksheets()]}")
+        rows = ws.get_all_records()
+        return await ctx.send(
+            f"✅ Sheets OK. Worksheet=`{worksheet_name}`, rows={len(rows)}. "
+            f"Service account={client_email}"
+        )
+
+    except json.JSONDecodeError as e:
+        return await ctx.send("❌ CREDS_BAD_JSON: your GSPREAD_CREDENTIALS is not valid JSON.")
+    except SpreadsheetNotFound as e:
+        return await ctx.send("❌ SHEET_NOT_FOUND: bad GOOGLE_SHEET_ID or no access.")
+    except APIError as e:
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            return await ctx.send("❌ SHEET_NOT_SHARED: share the sheet with the service account’s client_email.")
+        return await ctx.send(f"❌ GSHEETS_API_ERROR: {e}")
+    except Exception as e:
+        # show exact exception class & msg so we’re not blind
+        return await ctx.send(f"❌ DATA_SOURCE_UNAVAILABLE: {e.__class__.__name__}: {e}")
+
+
 # ---------- Friendly error messages (UI-side) ----------
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
