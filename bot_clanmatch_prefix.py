@@ -4,15 +4,15 @@
 #   !clanmatch  -> recruiter panel (hybrid: per-recruiter thread if role; else fixed thread)
 #   !clansearch -> user panel (in invoking channel)
 #   !clan       -> clan profile (tag or name)
-#   !ping, !health, !reload -> utility commands (restored)
+#   !ping, !health, !reload -> utility commands
 #
 # Behaviors:
-#   - Search posts ALL results in ONE message (chunks if >10 embeds)
-#   - Reset also deletes the last results message
+#   - Recruiter Search posts ALL results in ONE message (chunks if >10 embeds)
+#   - Reset also deletes the last results message(s)
 #   - Expire/Close disables panel, wipes results, shows "Reload new search"
-#   - Pointer: when panel appears in a thread, the invoking channel gets a link that self-deletes
+#   - Pointer: when !clanmatch panel appears in a thread, the invoking channel gets a link that self-deletes
 #
-# Requires: discord.py v2.x, aiohttp; optional gspread (for Google Sheets)
+# Requires: discord.py v2.x, aiohttp; gspread/google-auth for Google Sheets
 
 import os
 import json
@@ -48,7 +48,13 @@ PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))  # 1
 # Google Sheets (strict; no fallback)
 GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME")
+
+# Accept both new and old envs; default to your old tab
+CLANS_WORKSHEET_NAME = (
+    os.environ.get("CLANS_WORKSHEET_NAME")
+    or os.environ.get("WORKSHEET_NAME")
+    or "bot_info"
+)
 USE_GSHEETS = bool(GSPREAD_CREDENTIALS and GOOGLE_SHEET_ID)
 
 # Render web server
@@ -85,23 +91,55 @@ def _get(row: Dict[str, str], *keys: str) -> str:
     return ""
 
 def fetch_clans_raw() -> List[Dict]:
-    """Google Sheets only. Raise on misconfig/unavailable."""
+    """Google Sheets only, with diagnostic errors."""
     if not USE_GSHEETS:
-        log.error("Sheets misconfigured: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID (& CLANS_WORKSHEET_NAME).")
         raise RuntimeError("DATA_SOURCE_MISCONFIGURED")
     try:
         import gspread
+        from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError
         from google.oauth2.service_account import Credentials
+
         creds_info = json.loads(GSPREAD_CREDENTIALS)
         creds = Credentials.from_service_account_info(
             creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
         )
         client = gspread.authorize(creds)
-        ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(CLANS_WORKSHEET_NAME)
+
+        try:
+            sh = client.open_by_key(GOOGLE_SHEET_ID)
+        except SpreadsheetNotFound as e:
+            raise RuntimeError("SHEET_NOT_FOUND") from e
+
+        try:
+            ws = sh.worksheet(CLANS_WORKSHEET_NAME)
+        except WorksheetNotFound as e:
+            raise RuntimeError(f"WORKSHEET_NOT_FOUND:{CLANS_WORKSHEET_NAME}") from e
+
         return ws.get_all_records()
+
+    except json.JSONDecodeError as e:
+        raise RuntimeError("CREDS_BAD_JSON") from e
+    except APIError as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (401, 403):
+            raise RuntimeError("SHEET_NOT_SHARED") from e
+        raise RuntimeError("GSHEETS_API_ERROR") from e
     except Exception as e:
-        log.exception("Sheets error:")
         raise RuntimeError("DATA_SOURCE_UNAVAILABLE") from e
+
+def friendly_data_error(code: str) -> str:
+    if code == "DATA_SOURCE_MISCONFIGURED":
+        return ("Data source not configured. Admins: set `GSPREAD_CREDENTIALS`, `GOOGLE_SHEET_ID`, "
+                "and `CLANS_WORKSHEET_NAME` (or `WORKSHEET_NAME`).")
+    if code.startswith("WORKSHEET_NOT_FOUND"):
+        return f"Worksheet `{CLANS_WORKSHEET_NAME}` not found in the spreadsheet."
+    if code == "SHEET_NOT_FOUND":
+        return "Spreadsheet ID is invalid or inaccessible."
+    if code == "SHEET_NOT_SHARED":
+        return "Spreadsheet isn’t shared with my service account (`client_email` from GSPREAD_CREDENTIALS)."
+    if code == "CREDS_BAD_JSON":
+        return "Credentials JSON in `GSPREAD_CREDENTIALS` is invalid."
+    return "Clan data source unavailable. Try later."
 
 def filter_rows(rows: List[Dict], f: Dict) -> List[Dict]:
     out = []
@@ -209,21 +247,18 @@ async def _resolve_panel_target(ctx: commands.Context) -> discord.abc.Messageabl
         return ctx.channel
     # hybrid: recruiters -> per-recruiter thread; others -> fixed thread.
     if isinstance(ctx.author, discord.Member) and _is_recruiter(ctx.author):
-        # If per-recruiter thread fails, fall back to fixed thread (NOT the invoking channel).
         return (await _get_or_create_recruiter_thread(ctx)) or (await _get_fixed_thread()) or ctx.channel
     return (await _get_fixed_thread()) or ctx.channel
 
 async def _delete_after(delay: int, message: Optional[discord.Message]):
-    """Robust delayed delete with a couple of retries."""
+    """Robust delayed delete with a quick retry."""
     if not message:
         return
     try:
-        await asyncio.sleep(delay)
-        await message.delete()
+        await asyncio.sleep(delay); await message.delete()
     except Exception:
         try:
-            await asyncio.sleep(2)
-            await message.delete()
+            await asyncio.sleep(2); await message.delete()
         except Exception:
             pass
 
@@ -237,8 +272,6 @@ async def _pointer_and_cleanup(ctx: commands.Context, thread: discord.Thread):
         )
     except Exception:
         bounce = None
-
-    # schedule deletions
     asyncio.create_task(_delete_after(PANEL_BOUNCE_DELETE_SECONDS, bounce))
     asyncio.create_task(_delete_after(PANEL_BOUNCE_DELETE_SECONDS, ctx.message))
 
@@ -476,10 +509,7 @@ class RecruiterPanelView(BasePanelView):
             await i.response.defer(thinking=True)
             try: rows = fetch_clans_raw()
             except RuntimeError as err:
-                code=str(err)
-                msg=("Clan data not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
-                     if code=="DATA_SOURCE_MISCONFIGURED" else "Clan data source unavailable. Try again later.")
-                return await i.followup.send(msg, ephemeral=True)
+                return await i.followup.send(friendly_data_error(str(err)), ephemeral=True)
 
             filters={"clanboss":self.clanboss,"hydra":self.hydra,"chimera":self.chimera,
                      "playstyle":self.playstyle,"cvc":self.cvc,"siege":self.siege,"roster":self.roster}
@@ -495,7 +525,7 @@ class RecruiterPanelView(BasePanelView):
             ] if p])
             embeds = _results_embeds(res, label)
 
-            # Batch all embeds into as few messages as possible (Discord caps 10 embeds/message)
+            # Batch embeds into as few messages as possible (Discord caps 10 embeds/message)
             CHUNK = 10
             for i0 in range(0, len(embeds), CHUNK):
                 msg = await i.channel.send(embeds=embeds[i0:i0+CHUNK])
@@ -505,7 +535,7 @@ class RecruiterPanelView(BasePanelView):
         self.btn_cvc.callback=_cvc; self.btn_siege.callback=_siege; self.btn_roster.callback=_roster
         self.btn_reset.callback=_reset; self.btn_search.callback=_search
 
-# User panel (simpler)
+# User panel (simpler UI; also batches to one message for consistency)
 class UserPanelView(BasePanelView):
     TITLE = "C1C-Matchmaker • User Panel"
     def __init__(self, owner_id: int, timeout: Optional[float]):
@@ -535,10 +565,7 @@ class UserPanelView(BasePanelView):
             await i.response.defer(thinking=True)
             try: rows = fetch_clans_raw()
             except RuntimeError as err:
-                code=str(err)
-                msg=("Clan data not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
-                     if code=="DATA_SOURCE_MISCONFIGURED" else "Clan data source unavailable. Try again later.")
-                return await i.followup.send(msg, ephemeral=True)
+                return await i.followup.send(friendly_data_error(str(err)), ephemeral=True)
 
             filters={"clanboss":self.clanboss,"hydra":self.hydra,"chimera":self.chimera,"playstyle":self.playstyle}
             res = filter_rows(rows, filters)
@@ -591,10 +618,7 @@ async def clan_cmd(ctx: commands.Context, *, ident: str):
     try:
         rows = fetch_clans_raw()
     except RuntimeError as err:
-        code = str(err)
-        msg = ("Clan data not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
-               if code == "DATA_SOURCE_MISCONFIGURED" else "Clan data source unavailable. Try later.")
-        return await ctx.send(msg)
+        return await ctx.send(friendly_data_error(str(err)))
 
     best = None
     for r in rows:
@@ -620,7 +644,7 @@ async def clan_cmd(ctx: commands.Context, *, ident: str):
         if v: e.add_field(name=k, value=v, inline=True)
     await ctx.send(embed=e)
 
-# ---------- Utility commands (restored) ----------
+# ---------- Utility commands ----------
 @bot.command(name="ping", help="Check bot latency.")
 async def ping_cmd(ctx: commands.Context):
     await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
@@ -632,49 +656,37 @@ async def health_cmd(ctx: commands.Context):
 @bot.command(name="reload", help="Reload clan list (admin only).")
 @commands.has_permissions(administrator=True)
 async def reload_cmd(ctx: commands.Context):
-    # no caching yet; this confirms command wiring
+    # no caching yet; this confirms wiring
     await ctx.send("Reloaded.")
 
 # ---------- Friendly error messages (UI-side) ----------
-from discord.ext import commands
-import discord
-
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    # unwrap CommandInvokeError to the original
     original = getattr(error, "original", error)
 
-    # 1) Unknown command -> short hint (keep chat clean but not silent)
     if isinstance(error, commands.CommandNotFound):
         return await ctx.send("Unknown command. Try `!help`.")
 
-    # 2) Missing required args (e.g., `!clan` without a tag/name)
     if isinstance(error, commands.MissingRequiredArgument):
         if ctx.command and ctx.command.name == "clan":
             return await ctx.send("Usage: `!clan <tag|name>`")
-        # generic fallback
         return await ctx.send(f"Missing parameter. Usage: `!{ctx.command.qualified_name} {ctx.command.signature}`")
 
-    # 3) Cooldowns/checks
     if isinstance(error, commands.CheckFailure):
         return await ctx.send("You don't have permission to do that here.")
+
     if isinstance(error, commands.CommandOnCooldown):
         return await ctx.send(f"Slow down. Try again in {error.retry_after:.1f}s.")
 
-    # 4) Discord permission problems (very common when posting embeds/panels/threads)
     if isinstance(original, discord.Forbidden):
         return await ctx.send(
             "I can’t do that here. Please give me **Send Messages**, **Embed Links**, "
-            "**Send Messages in Threads**, **Create Public Threads**, and **Manage Messages** "
-            "in this channel/thread."
+            "**Send Messages in Threads**, **Create Public Threads**, and **Manage Messages**."
         )
 
-    # 5) Message too long / bad request
     if isinstance(original, discord.HTTPException):
-        # 400-range errors often mean payload too big / invalid; keep it generic
-        return await ctx.send("That didn’t work due to a Discord error. Try again or tweak your filters.")
+        return await ctx.send("Discord rejected that request. Try again or tweak your filters.")
 
-    # 6) Anything else → short note for the user, full details to logs
     try:
         cmd_name = getattr(ctx.command, "qualified_name", "unknown")
         log.exception("Unhandled error in command %s", cmd_name, exc_info=original)
