@@ -482,77 +482,81 @@ class ClanMatchView(discord.ui.View):
                         child.style = discord.ButtonStyle.primary
 
     async def _maybe_refresh(self, itx: discord.Interaction):
-    """If we already have a results message for !clanmatch, refresh it after criteria changes."""
-    if self.embed_variant != "classic":
-        return
-    if not self.results_message:
-        return
-    # Re-run the same search logic used in the button to rebuild results in-place
-    try:
-        rows = get_rows(False)
-    except Exception as e:
-        # If Sheets broke, just ignore refresh
-        return
+        """If we already have a results message for !clanmatch, refresh it after criteria changes."""
+        if self.embed_variant != "classic":
+            return
+        if not self.results_message:
+            return
 
-    matches = []
-    for row in rows[1:]:
+        # Re-run the same filter logic to rebuild the results
         try:
-            if is_header_row(row):
+            rows = get_rows(False)
+        except Exception:
+            return
+
+        matches = []
+        for row in rows[1:]:
+            try:
+                if is_header_row(row):
+                    continue
+                if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
+                    spots_num = parse_spots_num(row[COL_E_SPOTS])
+                    if self.roster_mode == "open" and spots_num <= 0:
+                        continue
+                    if self.roster_mode == "full" and spots_num > 0:
+                        continue
+                    matches.append(row)
+            except Exception:
                 continue
-            if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
-                spots_num = parse_spots_num(row[COL_E_SPOTS])
-                if self.roster_mode == "open" and spots_num <= 0:
-                    continue
-                if self.roster_mode == "full" and spots_num > 0:
-                    continue
-                matches.append(row)
-        except Exception:
-            continue
 
-    # If no matches, just wipe the old results message so it’s clear
-    if not matches:
-        try:
-            await self.results_message.edit(content="No matching clans with current filters. Adjust and I’ll update here.", embeds=[], view=None)
-        except Exception:
-            pass
-        return
+        # No matches → clear the embeds on the existing results message
+        if not matches:
+            try:
+                await self.results_message.edit(
+                    content="No matching clans with current filters. Adjust and I’ll update here.",
+                    embeds=[],
+                    view=None
+                )
+            except Exception:
+                pass
+            return
 
-    filters_text = format_filters_footer(self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode)
-    builder = make_embed_for_row_classic  # classic variant only
+        filters_text = format_filters_footer(
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+        )
+        builder = make_embed_for_row_classic  # classic variant only
 
-    total = len(matches)
-    if total <= PAGE_SIZE:
-        # No pagination: update/replace embeds in the same message
+        total = len(matches)
+        if total <= PAGE_SIZE:
+            # No pagination: update embeds in place and drop any old pager
+            embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
+            self._active_view = None
+            try:
+                await self.results_message.edit(embeds=embeds, view=None)
+            except Exception:
+                sent = await itx.followup.send(embeds=embeds)
+                self.results_message = sent
+            return
+
+        # Paginated mode
+        view = PagedResultsView(
+            author_id=itx.user.id,
+            rows=matches,
+            builder=builder,
+            filters_text=filters_text,
+            guild=itx.guild,
+            timeout=300
+        )
         embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-        # If there was a pager view before, drop it
-        self._active_view = None
         try:
-            await self.results_message.edit(embeds=embeds, view=None)
+            await self.results_message.edit(embeds=embeds, view=view)
+            self._active_view = view
+            view.message = self.results_message
         except Exception:
-            # If edit failed (e.g., deleted), send a fresh one
-            sent = await itx.followup.send(embeds=embeds)
+            sent = await itx.followup.send(embeds=embeds, view=view)
             self.results_message = sent
-        return
-
-    # Paginated mode
-    view = PagedResultsView(
-        author_id=itx.user.id,
-        rows=matches,
-        builder=builder,
-        filters_text=filters_text,
-        guild=itx.guild,
-        timeout=300
-    )
-    embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-    try:
-        await self.results_message.edit(embeds=embeds, view=view)
-        self._active_view = view
-        view.message = self.results_message
-    except Exception:
-        sent = await itx.followup.send(embeds=embeds, view=view)
-        self.results_message = sent
-        self._active_view = view
-        view.message = sent
+            self._active_view = view
+            view.message = sent
 
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
@@ -1156,4 +1160,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
