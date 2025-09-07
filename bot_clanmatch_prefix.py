@@ -1,4 +1,4 @@
-# C1C Matchmaker — bot_clanmatch_prefix.py (robust table reader)
+# C1C Matchmaker — bot_clanmatch_prefix.py (robust lookup edition)
 # Env vars:
 #   GSHEET_ID | GOOGLE_SHEET_ID | CONFIG_SHEET_ID
 #   GOOGLE_SERVICE_ACCOUNT_JSON | SERVICE_ACCOUNT_JSON
@@ -36,7 +36,7 @@ def c1c_make_intents():
 
 # Emoji resolver
 import discord as _discord
-_EMOJI_TAG_RE = _reh.compile(r"^<a?:\\w+:\\d+>$")
+_EMOJI_TAG_RE = _reh.compile(r"^<a?:\w+:\d+>$")
 def resolve_emoji_text(guild: _discord.Guild, value: _Optional[str], fallback: _Optional[str]=None) -> str:
     v = (value or fallback or "").strip()
     if not v: return ""
@@ -84,7 +84,7 @@ UTC = timezone.utc
 log = c1c_get_logger("c1c.clanmatch")
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-DEFAULT_TAB = os.getenv("C1C_MATCH_TAB", "bot_info")  # default worksheet/tab
+DEFAULT_TAB   = os.getenv("C1C_MATCH_TAB", "bot_info")  # default worksheet/tab
 
 # ------------------- tiny web (Render health) -------------------
 async def _health(_): return web.Response(text="ok")
@@ -117,18 +117,13 @@ def get_ws(sh, name: Optional[str]):
 
 def _dedupe_headers(headers: List[str]) -> List[str]:
     """Trim, replace blanks with _colN, and dedupe by appending _2, _3…"""
-    out = []
-    seen = {}
+    out, seen = [], {}
     for i, h in enumerate(headers, start=1):
         base = (h or "").strip()
-        if base == "":
-            base = f"_col{i}"
+        if base == "": base = f"_col{i}"
         count = seen.get(base, 0)
         seen[base] = count + 1
-        if count == 0:
-            out.append(base)
-        else:
-            out.append(f"{base}_{count+1}")
+        out.append(base if count == 0 else f"{base}_{count+1}")
     return out
 
 def _looks_like_header(row: List[str]) -> bool:
@@ -136,41 +131,83 @@ def _looks_like_header(row: List[str]) -> bool:
     keys = {"clantag","clan tag","clanname","clan name","tag","name","level","spots"}
     return any(k in low for k in keys)
 
-def read_records(ws) -> List[Dict[str, str]]:
-    """
-    Robust reader for sheets with blank/duplicate headers or header not on row 1.
-    - Scans first 20 rows to find a likely header.
-    - Dedupe/patch headers, then map remaining rows.
-    - Filters out fully empty rows.
-    """
+def get_headers(ws) -> List[str]:
     vals = ws.get_all_values()
-    if not vals:
-        return []
+    if not vals: return []
+    header_idx = 0
+    scan_upto = min(20, len(vals))
+    for i in range(scan_upto):
+        if _looks_like_header(vals[i]):
+            header_idx = i; break
+    return _dedupe_headers(vals[header_idx])
+
+def read_records(ws) -> List[Dict[str, str]]:
+    """Robust rows: detect header, patch duplicates/blanks, map remaining rows."""
+    vals = ws.get_all_values()
+    if not vals: return []
     # find header row
     header_idx = 0
     scan_upto = min(20, len(vals))
     for i in range(scan_upto):
         if _looks_like_header(vals[i]):
-            header_idx = i
-            break
+            header_idx = i; break
     headers = _dedupe_headers(vals[header_idx])
     data_rows = vals[header_idx+1:]
     out = []
     for r in data_rows:
-        # align length
-        if len(r) < len(headers):
-            r = r + [""]*(len(headers)-len(r))
-        elif len(r) > len(headers):
-            r = r[:len(headers)]
-        # skip if completely empty
-        if not any(str(c).strip() for c in r):
+        if len(r) < len(headers): r = r + [""]*(len(headers)-len(r))
+        elif len(r) > len(headers): r = r[:len(headers)]
+        if not any(str(c).strip() for c in r):  # skip empty
             continue
         out.append({ headers[i]: r[i] for i in range(len(headers)) })
     return out
 
-# ------------------- Helpers for flexible data -------------------
+# ------------------- Flexible field matching -------------------
+TAG_HINTS  = ("clantag", "clan tag", "tag", "abbr", "abbrev", "short", "ticker", "code", "id")
+NAME_HINTS = ("clanname", "clan name", "name")  # avoid catching "tag" here
+
+def norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+def tag_keys_in(headers: List[str]) -> List[str]:
+    out=[]
+    for h in headers:
+        hl=h.strip().lower()
+        if any(k in hl for k in TAG_HINTS):
+            out.append(h)
+    return out
+
+def name_keys_in(headers: List[str]) -> List[str]:
+    out=[]
+    for h in headers:
+        hl=h.strip().lower()
+        if ("name" in hl) and ("tag" not in hl):  # keep names, not tags
+            out.append(h)
+    return out
+
+def find_row(rows: List[Dict[str,str]], headers: List[str], query: str) -> Optional[Dict[str,str]]:
+    want = norm(query)
+    tkeys = tag_keys_in(headers)
+    nkeys = name_keys_in(headers)
+    # 1) exact/normalized match on tag-like fields
+    for r in rows:
+        for k in tkeys:
+            if norm(r.get(k,"")) == want:
+                return r
+    # 2) exact/normalized match on name-like fields
+    for r in rows:
+        for k in nkeys:
+            if norm(r.get(k,"")) == want:
+                return r
+    # 3) fallback: substring match anywhere (normalized)
+    for r in rows:
+        for k in (tkeys + nkeys):
+            if want and want in norm(r.get(k,"")):
+                return r
+    return None
+
+# ------------------- Helpers for formatting -------------------
 def _pick(d: dict, *names, default=None):
-    """Return first present, non-empty value by any of the provided names."""
     for n in names:
         if n in d and str(d[n]).strip() != "":
             return d[n]
@@ -222,8 +259,8 @@ def format_entry_criteria_row(row: dict) -> str:
     return "**Entry Criteria:**\n" + ("\n".join(lines) if lines else "—")
 
 def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.Embed:
-    tag   = str(_pick(row, "ClanTag", "Tag", "Clan Tag", default="")).strip()
-    name  = str(_pick(row, "ClanName", "Name", "Clan Name", default=tag)).strip()
+    tag   = str(_pick(row, "ClanTag", "Clan Tag", "Tag", default="")).strip()
+    name  = str(_pick(row, "ClanName", "Clan Name", "Name", default=tag)).strip()
     level = _to_int_or_none(_pick(row, "Level", "Lvl", "Clan Level"))
     spots = _to_int_or_none(_pick(row, "Spots", "Open Spots", "Open", "OpenSlots", "Open spots"))
     title = f"{name}" + (f" | {tag}" if tag else "") + (f" | Level {level}" if level is not None else "") + (f" | Spots: {spots}" if spots is not None else "")
@@ -259,12 +296,23 @@ def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.
     return embed
 
 # ------------------- Commands -------------------
+@bot.command(name="cmheaders")
+async def cmheaders(ctx, tab: Optional[str] = None):
+    """Show the headers the bot sees (after cleaning)."""
+    try:
+        sh = open_sheet_by_env()
+        ws = get_ws(sh, tab)
+        headers = get_headers(ws)
+        await ctx.reply("Headers in `" + ws.title + "`:\n" + ", ".join(headers))
+    except Exception as e:
+        await ctx.reply(f"❌ Headers failed: `{type(e).__name__}: {e}`")
+
 @bot.command(name="cmwhichsheet")
 async def cmwhichsheet(ctx):
     try:
         sh = open_sheet_by_env()
         tabs = ", ".join(ws.title for ws in sh.worksheets()) or "—"
-        await ctx.reply(f"✅ Connected to sheet `{sh.id}`.\nTabs: {tabs}\nDefault tab: `{DEFAULT_TAB}`\nTip: `!cmdump <ClanTagOrName> [TabName]`")
+        await ctx.reply(f"✅ Connected to sheet `{sh.id}`.\nTabs: {tabs}\nDefault tab: `{DEFAULT_TAB}`")
     except Exception as e:
         await ctx.reply(f"❌ Sheet connect failed: `{type(e).__name__}: {e}`")
 
@@ -282,27 +330,25 @@ async def cmchecksheet(ctx, tab: Optional[str] = None):
     except Exception as e:
         return await ctx.reply(f"❌ Matchmaker sheet check failed: `{type(e).__name__}: {e}`")
 
+def _find_target_row(sh, tab, query) -> Optional[Dict[str,str]]:
+    ws = get_ws(sh, tab)
+    rows = read_records(ws)
+    headers = list(rows[0].keys()) if rows else get_headers(ws)
+    return find_row(rows, headers, query)
+
 @bot.command(name="cmdump")
 async def cmdump(ctx, clan: str, tab: Optional[str] = None):
     """Shows exactly what the bot reads from the sheet for one clan."""
     try:
         sh = open_sheet_by_env()
-        ws = get_ws(sh, tab)
-        rows = read_records(ws)
-        want = clan.strip().lower()
-        target = None
-        for r in rows:
-            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
-            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
-            if want in (tag, name):
-                target = r; break
+        target = _find_target_row(sh, tab, clan)
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
+            ws = get_ws(sh, tab)
+            hdr = get_headers(ws)
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.\n(Searching in: {', '.join(tag_keys_in(hdr)+name_keys_in(hdr)) or '—'})")
         pretty = json.dumps(target, indent=2, ensure_ascii=False)
         if len(pretty) > 1900: pretty = pretty[:1900] + "\n… (truncated)"
         await ctx.reply(f"```json\n{pretty}\n```")
-    except gspread.WorksheetNotFound:
-        await ctx.reply(f"⚠️ Tab `{tab or DEFAULT_TAB}` not found.")
     except Exception as e:
         await ctx.reply(f"❌ Dump failed: `{type(e).__name__}: {e}`")
 
@@ -311,17 +357,11 @@ async def cmformat(ctx, clan: str, tab: Optional[str] = None):
     """Renders the Entry Criteria text for a clan using the safe formatter."""
     try:
         sh = open_sheet_by_env()
-        ws = get_ws(sh, tab)
-        rows = read_records(ws)
-        want = clan.strip().lower()
-        target = None
-        for r in rows:
-            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
-            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
-            if want in (tag, name):
-                target = r; break
+        target = _find_target_row(sh, tab, clan)
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
+            ws = get_ws(sh, tab)
+            hdr = get_headers(ws)
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.\n(Searching in: {', '.join(tag_keys_in(hdr)+name_keys_in(hdr)) or '—'})")
         text = format_entry_criteria_row(target)
         await ctx.reply(text)
     except Exception as e:
@@ -334,15 +374,23 @@ async def cmsearch(ctx, *, text: str):
         sh = open_sheet_by_env()
         ws = get_ws(sh, None)
         rows = read_records(ws)
-        want = text.strip().lower()
+        headers = list(rows[0].keys()) if rows else get_headers(ws)
+        tkeys, nkeys = tag_keys_in(headers), name_keys_in(headers)
+        want = norm(text)
         hits = []
         for r in rows:
-            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip()
-            name = str(r.get("ClanName", r.get("Clan Name",""))).strip()
-            if want in tag.lower() or want in name.lower():
+            cand = []
+            for k in (tkeys + nkeys):
+                val = str(r.get(k,"")).strip()
+                if not val: continue
+                if want in norm(val):
+                    cand.append(val)
+            if cand:
                 level = _to_int_or_none(_pick(r,"Level","Lvl","Clan Level"))
                 spots = _to_int_or_none(_pick(r,"Spots","Open Spots","Open"))
-                hits.append(f"{name} ({tag}) · L{level or '?'} · spots {spots or '?'}")
+                name  = _pick(r,"ClanName","Clan Name","Name", default="")
+                tag   = _pick(r,"ClanTag","Clan Tag","Tag", default="")
+                hits.append(f"{name or tag} ({tag or name}) · L{level or '?'} · spots {spots or '?'}")
         if not hits:
             return await ctx.reply("No matches.")
         await ctx.reply("\n".join(hits[:15]))
@@ -354,17 +402,11 @@ async def cmpost(ctx, clan: str, tab: Optional[str] = None):
     """Post one Matchmaker card for a given clan from the sheet."""
     try:
         sh = open_sheet_by_env()
-        ws = get_ws(sh, tab)
-        rows = read_records(ws)
-        want = clan.strip().lower()
-        target = None
-        for r in rows:
-            tag  = str(r.get("ClanTag", r.get("Clan Tag",""))).strip().lower()
-            name = str(r.get("ClanName", r.get("Clan Name",""))).strip().lower()
-            if want in (tag, name):
-                target = r; break
+        target = _find_target_row(sh, tab, clan)
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
+            ws = get_ws(sh, tab)
+            hdr = get_headers(ws)
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.\n(Searching in: {', '.join(tag_keys_in(hdr)+name_keys_in(hdr)) or '—'})")
         embed = build_clan_embed(target, ctx.guild)
         allow = discord.AllowedMentions(everyone=False, roles=False, users=False)
         msg = await ctx.send(embed=embed, allowed_mentions=allow)
