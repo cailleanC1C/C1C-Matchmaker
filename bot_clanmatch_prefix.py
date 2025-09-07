@@ -48,7 +48,7 @@ PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))  # 1
 # Google Sheets (strict; no fallback)
 GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-CLANS_WORKSHEET_NAME = os.environ.get("CLANS_WORKSHEET_NAME", "Clans")
+CLANS_WORKSHEET_NAME = os.environ.get("CLANS_WORKSHEET_NAME")
 USE_GSHEETS = bool(GSPREAD_CREDENTIALS and GOOGLE_SHEET_ID)
 
 # Render web server
