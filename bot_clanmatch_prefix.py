@@ -415,6 +415,51 @@ async def cmpost(ctx, clan: str, tab: Optional[str] = None):
     except Exception as e:
         await ctx.reply(f"❌ Post failed: `{type(e).__name__}: {e}`")
 
+# ---------- Compat shims + help ----------
+from discord.ext.commands import CommandNotFound
+
+@bot.command(name="help")
+async def help_cmd(ctx):
+    await ctx.reply(
+        "**C1C Matchmaker — Commands**\n"
+        "`!clan <tag|name>` → post one card (alias of `!cmpost`)\n"
+        "`!clansearch <text>` → search clans (alias of `!cmsearch`)\n"
+        "`!cmpost <tag|name> [tab]` · `!cmsearch <text>`\n"
+        "`!cmdump <tag|name> [tab]` · `!cmformat <tag|name> [tab]`\n"
+        "`!cmwhichsheet` · `!cmchecksheet [tab]` · `!cmheaders [tab]`\n"
+        f"(Default tab: `{DEFAULT_TAB}` — change via env `C1C_MATCH_TAB`)"
+    )
+
+@bot.command(name="clan")
+async def clan_cmd(ctx, *, query: str = ""):
+    if not query.strip():
+        return await ctx.reply("Usage: `!clan <tag|name>` — posts one card. See `!help`.")
+    # use default tab (bot_info unless overridden)
+    await cmpost(ctx, query, None)
+
+@bot.command(name="clanmatch")
+async def clanmatch_cmd(ctx, *, query: str = ""):
+    # same behavior as !clan
+    await clan_cmd(ctx, query=query)
+
+@bot.command(name="clansearch")
+async def clansearch_cmd(ctx, *, text: str = ""):
+    if not text.strip():
+        return await ctx.reply("Usage: `!clansearch <text>` — finds matching clans. See `!help`.")
+    await cmsearch(ctx, text=text)
+
+@bot.event
+async def on_command_error(ctx, error):
+    # friendlier UX than silent failure
+    if isinstance(error, CommandNotFound):
+        return await ctx.reply("❓ Unknown command. Try `!help`.")
+    try:
+        await ctx.reply(f"⚠️ Command error: `{type(error).__name__}: {error}`")
+    finally:
+        log.exception("Command error", exc_info=error)
+# ---------- end compat ----------
+
+
 # ------------------- On Ready -------------------
 @bot.event
 async def on_ready():
