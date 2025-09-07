@@ -1,9 +1,9 @@
 # C1C Matchmaker — bot_clanmatch_prefix.py
-# Single-file edition with harmonized helpers + debug/format tools.
 # Env vars supported (preferred first):
 #   GSHEET_ID | GOOGLE_SHEET_ID | CONFIG_SHEET_ID
 #   GOOGLE_SERVICE_ACCOUNT_JSON | SERVICE_ACCOUNT_JSON
 #   DISCORD_TOKEN
+#   C1C_MATCH_TAB (optional, default "bot_info")
 
 import os, json, logging, asyncio, re
 from typing import Optional, Dict, List
@@ -36,7 +36,7 @@ def c1c_make_intents():
 
 # Emoji resolver
 import discord as _discord
-_EMOJI_TAG_RE = _reh.compile(r"^<a?:\w+:\d+>$")
+_EMOJI_TAG_RE = _reh.compile(r"^<a?:\\w+:\\d+>$")
 def resolve_emoji_text(guild: _discord.Guild, value: _Optional[str], fallback: _Optional[str]=None) -> str:
     v = (value or fallback or "").strip()
     if not v: return ""
@@ -84,6 +84,8 @@ UTC = timezone.utc
 log = c1c_get_logger("c1c.clanmatch")
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+# Default worksheet/tab for Matchmaker data (case-insensitive)
+DEFAULT_TAB = os.getenv("C1C_MATCH_TAB", "bot_info")
 
 # ------------------- tiny web (Render health) -------------------
 async def _health(_): return web.Response(text="ok")
@@ -126,6 +128,18 @@ def _boolish(val, default=False):
     if s in ("0","n","no","false","closed"): return False
     return default
 
+def get_ws(sh, name: Optional[str]):
+    """Return worksheet by name, case-insensitive. Uses DEFAULT_TAB if name is None/empty."""
+    wanted = (name or DEFAULT_TAB).strip()
+    try:
+        return sh.worksheet(wanted)  # exact match
+    except gspread.WorksheetNotFound:
+        lw = wanted.lower()
+        for ws in sh.worksheets():
+            if ws.title.lower() == lw:
+                return ws
+        raise gspread.WorksheetNotFound(wanted)
+
 def format_entry_criteria_row(row: dict) -> str:
     """
     Builds the 'Entry Criteria' text robustly from many possible header names.
@@ -139,12 +153,12 @@ def format_entry_criteria_row(row: dict) -> str:
     nonpr_min    = _to_int_or_none(_pick(row, "non PR minimum", "NonPR minimum", "Non PR Min", "NonPR Min", "NonPR", "nonPR", "NPR"))
 
     lines = []
-    if hydra_keys or hydra_target:
+    if hydra_keys is not None or hydra_target is not None:
         parts = []
         if hydra_keys is not None:   parts.append(f"{_plural(hydra_keys, 'key')}")
         if hydra_target is not None: parts.append(f"{hydra_target}M Hydra Clash")
         lines.append("Hydra: " + " — ".join(parts) if parts else "Hydra")
-    if chim_keys or chim_target:
+    if chim_keys is not None or chim_target is not None:
         parts = []
         if chim_keys is not None:    parts.append(f"{_plural(chim_keys, 'key')}")
         if chim_target is not None:  parts.append(f"{chim_target}M Chimera Clash")
@@ -191,7 +205,6 @@ def build_clan_embed(row: dict, guild: Optional[discord.Guild]=None) -> discord.
         if thumb.startswith("http"):
             embed.set_thumbnail(url=thumb)
         elif guild:
-            # try emoji as thumbnail if custom
             emo = None
             if thumb.isdigit():
                 emo = discord.utils.get(guild.emojis, id=int(thumb))
@@ -209,32 +222,30 @@ async def cmwhichsheet(ctx):
     try:
         sh = open_sheet_by_env()
         tabs = ", ".join(ws.title for ws in sh.worksheets()) or "—"
-        await ctx.reply(f"✅ Connected to sheet `{sh.id}`.\nTabs: {tabs}\nTip: `!cmdump <ClanTagOrName> [TabName]`")
+        await ctx.reply(f"✅ Connected to sheet `{sh.id}`.\nTabs: {tabs}\nDefault tab: `{DEFAULT_TAB}`\nTip: `!cmdump <ClanTagOrName> [TabName]`")
     except Exception as e:
         await ctx.reply(f"❌ Sheet connect failed: `{type(e).__name__}: {e}`")
 
 @bot.command(name="cmchecksheet")
-async def cmchecksheet(ctx, tab: str | None = None):
+async def cmchecksheet(ctx, tab: Optional[str] = None):
     try:
         sh = open_sheet_by_env()
         titles = [ws.title for ws in sh.worksheets()]
-        if tab:
-            try:
-                ws = sh.worksheet(tab)
-                rows = len(ws.get_all_values()) - 1
-                return await ctx.reply(f"✅ Connected. Tab `{tab}` rows: **{rows}**")
-            except gspread.WorksheetNotFound:
-                return await ctx.reply(f"⚠️ Connected, but tab `{tab}` not found.\nAvailable: {', '.join(titles) or '—'}")
-        return await ctx.reply(f"✅ Sheet OK (Matchmaker). Tabs: {', '.join(titles) or '—'}\nTip: `!cmchecksheet <TabName>` to check one.")
+        try:
+            ws = get_ws(sh, tab)  # uses DEFAULT_TAB if tab is None
+            rows = len(ws.get_all_values()) - 1
+            return await ctx.reply(f"✅ Connected. Tab `{ws.title}` rows: **{rows}**")
+        except gspread.WorksheetNotFound:
+            return await ctx.reply(f"⚠️ Connected, but tab `{tab or DEFAULT_TAB}` not found.\nAvailable: {', '.join(titles) or '—'}")
     except Exception as e:
         return await ctx.reply(f"❌ Matchmaker sheet check failed: `{type(e).__name__}: {e}`")
 
 @bot.command(name="cmdump")
-async def cmdump(ctx, clan: str, tab: str = "CLANS"):
+async def cmdump(ctx, clan: str, tab: Optional[str] = None):
     """Shows exactly what the bot reads from the sheet for one clan."""
     try:
         sh = open_sheet_by_env()
-        ws = sh.worksheet(tab)
+        ws = get_ws(sh, tab)
         rows = ws.get_all_records()
         target = None
         want = clan.strip().lower()
@@ -244,22 +255,22 @@ async def cmdump(ctx, clan: str, tab: str = "CLANS"):
             if want in (tag, name):
                 target = r; break
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{tab}`.")
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
         pretty = json.dumps(target, indent=2, ensure_ascii=False)
         if len(pretty) > 1900:
             pretty = pretty[:1900] + "\n… (truncated)"
         await ctx.reply(f"```json\n{pretty}\n```")
     except gspread.WorksheetNotFound:
-        await ctx.reply(f"⚠️ Tab `{tab}` not found.")
+        await ctx.reply(f"⚠️ Tab `{tab or DEFAULT_TAB}` not found.")
     except Exception as e:
         await ctx.reply(f"❌ Dump failed: `{type(e).__name__}: {e}`")
 
 @bot.command(name="cmformat")
-async def cmformat(ctx, clan: str, tab: str = "CLANS"):
+async def cmformat(ctx, clan: str, tab: Optional[str] = None):
     """Renders the Entry Criteria text for a clan using the safe formatter."""
     try:
         sh = open_sheet_by_env()
-        ws = sh.worksheet(tab)
+        ws = get_ws(sh, tab)
         rows = ws.get_all_records()
         target = None
         want = clan.strip().lower()
@@ -269,7 +280,7 @@ async def cmformat(ctx, clan: str, tab: str = "CLANS"):
             if want in (tag, name):
                 target = r; break
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{tab}`.")
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
         text = format_entry_criteria_row(target)
         await ctx.reply(text)
     except Exception as e:
@@ -277,10 +288,10 @@ async def cmformat(ctx, clan: str, tab: str = "CLANS"):
 
 @bot.command(name="cmsearch")
 async def cmsearch(ctx, *, text: str):
-    """Quick search by name or tag in CLANS tab."""
+    """Quick search by name or tag in DEFAULT_TAB (bot_info unless overridden)."""
     try:
         sh = open_sheet_by_env()
-        ws = sh.worksheet("CLANS")
+        ws = get_ws(sh, None)
         rows = ws.get_all_records()
         want = text.strip().lower()
         hits = []
@@ -298,11 +309,11 @@ async def cmsearch(ctx, *, text: str):
         await ctx.reply(f"❌ Search failed: `{type(e).__name__}: {e}`")
 
 @bot.command(name="cmpost")
-async def cmpost(ctx, clan: str, tab: str = "CLANS"):
+async def cmpost(ctx, clan: str, tab: Optional[str] = None):
     """Post one Matchmaker card for a given clan from the sheet."""
     try:
         sh = open_sheet_by_env()
-        ws = sh.worksheet(tab)
+        ws = get_ws(sh, tab)
         rows = ws.get_all_records()
         target = None
         want = clan.strip().lower()
@@ -312,7 +323,7 @@ async def cmpost(ctx, clan: str, tab: str = "CLANS"):
             if want in (tag, name):
                 target = r; break
         if not target:
-            return await ctx.reply(f"❓ No row for `{clan}` in tab `{tab}`.")
+            return await ctx.reply(f"❓ No row for `{clan}` in tab `{ws.title}`.")
         embed = build_clan_embed(target, ctx.guild)
         allow = discord.AllowedMentions(everyone=False, roles=False, users=False)
         msg = await ctx.send(embed=embed, allowed_mentions=allow)
@@ -325,6 +336,7 @@ async def cmpost(ctx, clan: str, tab: str = "CLANS"):
 @bot.event
 async def on_ready():
     log.info("Logged in as %s (%s)", bot.user, bot.user.id)
+    log.info("Default data tab: %s", DEFAULT_TAB)
 
 # ------------------- Startup -------------------
 async def _main():
