@@ -11,6 +11,8 @@ from discord.utils import get
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError, WorksheetNotFound
+from googleapiclient.discovery import build
 
 from aiohttp import web, ClientSession
 from PIL import Image  # Pillow
@@ -28,7 +30,7 @@ def _fmt_uptime():
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly", "https://www.googleapis.com/auth/drive.readonly"]
 
 # Public base URL for proxying padded emoji images
 BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
@@ -50,7 +52,31 @@ _gc = None
 _ws = None
 _cache_rows = None
 _cache_time = 0.0
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 60
+# Fallback-capable Sheets helpers
+_SHEETS_SVC = None
+def _build_creds():
+    return Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+
+def _get_sheets_service():
+    global _SHEETS_SVC
+    if _SHEETS_SVC:
+        return _SHEETS_SVC
+    creds = _build_creds()
+    _SHEETS_SVC = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _SHEETS_SVC
+
+def _read_values_direct(sheet_id: str, tab: str):
+    svc = _get_sheets_service()
+    rng = f"{tab}!A1:ZZ9999"
+    resp = svc.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range=rng,
+        valueRenderOption="UNFORMATTED_VALUE",
+        majorDimension="ROWS",
+    ).execute()
+    return resp.get("values", []) or []
+  # seconds
 
 def get_ws(force: bool = False):
     """Connect to Google Sheets only when needed."""
@@ -66,12 +92,35 @@ def get_ws(force: bool = False):
     return _ws
 
 def get_rows(force: bool = False):
-    """Return all rows with simple 60s cache."""
-    global _cache_rows, _cache_time
-    if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
+    """Return all rows with simple 60s cache. Uses gspread first, then falls back to Sheets API values.get on APIError 400."""
+    global _cache_rows, _cache_time, _gc, _ws
+    if not force and _cache_rows is not None and (time.time() - _cache_time) <= CACHE_TTL:
+        return _cache_rows
+
+    if not CREDS_JSON or not SHEET_ID:
+        raise RuntimeError("Missing GSPREAD_CREDENTIALS or GOOGLE_SHEET_ID")
+
+    rows = None
+    try:
         ws = get_ws(False)
-        _cache_rows = ws.get_all_values()
-        _cache_time = time.time()
+        rows = ws.get_all_values()
+    except WorksheetNotFound:
+        raise RuntimeError(f"Worksheet '{WORKSHEET_NAME}' not found. Rename the tab or set WORKSHEET_NAME.")
+    except APIError as e:
+        status = getattr(getattr(e, 'response', None), 'status', None)
+        if status == 400:
+            rows = _read_values_direct(SHEET_ID, WORKSHEET_NAME)
+        else:
+            raise
+    except Exception:
+        # unknown gspread quirk -> fallback
+        rows = _read_values_direct(SHEET_ID, WORKSHEET_NAME)
+
+    if rows is None:
+        rows = []
+
+    _cache_rows = rows
+    _cache_time = time.time()
     return _cache_rows
 
 def clear_cache():
@@ -306,6 +355,14 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
 # ------------------- Reaction flip registry -------------------
 REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel_id, filters}
 
+def _prune_react_index(max_entries: int = 500, drop: int = 100):
+    try:
+        if len(REACT_INDEX) > max_entries:
+            for mid in list(REACT_INDEX.keys())[:drop]:
+                REACT_INDEX.pop(mid, None)
+    except Exception:
+        pass
+
 # ------------------- Discord bot -------------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -345,6 +402,10 @@ class ClanMatchView(discord.ui.View):
                     description=f"⏳ This panel expired. Type **{cmd}** to open a fresh one."
                 )
                 await self.message.edit(embed=expired, view=self)
+                try:
+                    ACTIVE_PANELS.pop((self.author_id, self.embed_variant), None)
+                except Exception:
+                    pass
         except Exception as e:
             print("[view timeout] failed to edit:", e)
 
@@ -526,6 +587,7 @@ class ClanMatchView(discord.ui.View):
                 try: await msg.add_reaction("💡")
                 except Exception: pass
                 REACT_INDEX[msg.id] = {
+
                     "row": r,
                     "kind": "profile_from_search",
                     "guild_id": itx.guild_id,
@@ -744,6 +806,7 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
             "channel_id": msg.channel.id,
             "filters": "",
         }
+        _prune_react_index()
         await _safe_delete(ctx.message)
     except Exception as e:
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
@@ -779,12 +842,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             except Exception: pass
 
             REACT_INDEX[sent.id] = {
+
                 "row": row,
                 "kind": "profile_from_search",
                 "guild_id": guild.id if guild else None,
                 "channel_id": sent.channel.id,
                 "filters": info.get("filters", ""),
             }
+            _prune_react_index()
 
         else:  # "profile_from_search" → show Profile from an entry-criteria card
             embed = make_embed_for_profile(row, guild)
@@ -793,6 +858,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             except Exception: pass
 
             REACT_INDEX[sent.id] = {
+
                 "row": row,
                 "kind": "entry_from_profile",
                 "guild_id": guild.id if guild else None,
@@ -861,6 +927,13 @@ async def emoji_pad_handler(request: web.Request):
     Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
     """
     src = request.query.get("u")
+    from urllib.parse import urlparse
+    ALLOWED_HOSTS = {"cdn.discordapp.com", "media.discordapp.net", "images-ext-1.discordapp.net"}
+    if src:
+        ph = urlparse(src)
+        if ph.hostname not in ALLOWED_HOSTS:
+            return web.Response(status=400, text="host not allowed")
+
     size = int(request.query.get("s", str(EMOJI_PAD_SIZE)))
     box  = float(request.query.get("box", str(EMOJI_PAD_BOX)))
     if not src:
@@ -933,3 +1006,33 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
+
+
+
+@bot.command(name="sheetdiag")
+@commands.has_permissions(administrator=True)
+async def sheetdiag(ctx):
+    used_fallback = False
+    try:
+        rows = get_rows(force=True)
+    except Exception as e:
+        used_fallback = True
+        try:
+            rows = _read_values_direct(SHEET_ID, WORKSHEET_NAME)
+        except Exception as ee:
+            await ctx.reply(f"Diag failed: {e}\nFallback also failed: {ee}")
+            return
+    info_lines = []
+    try:
+        svc = _get_sheets_service()
+        meta = svc.spreadsheets().get(spreadsheetId=SHEET_ID, includeGridData=False).execute()
+        props = meta.get("properties", {})
+        sheets = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        info_lines.append(f"Spreadsheet title: {props.get('title')}")
+        info_lines.append("Tabs: " + (", ".join(sheets) if sheets else "(none)"))
+        info_lines.append(f"Looking for tab: {WORKSHEET_NAME}")
+        info_lines.append(f"Rows read: {len(rows)}")
+        info_lines.append(f"Fallback path used: {'yes' if used_fallback else 'no'}")
+    except Exception as m:
+        info_lines.append(f"Meta fetch error: {m}")
+    await ctx.reply("```\n" + "\n".join(info_lines) + "\n```")
