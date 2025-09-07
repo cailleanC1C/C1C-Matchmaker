@@ -2,7 +2,7 @@
 # C1C-Matchmaker — fixed-thread spawn (pointer + auto-delete), panel UI with dropdowns/chips,
 # single-message results, Reset also deletes results, wipe-on-expire/close, Reload-on-expire,
 # restored commands (!clansearch, !clanprofile/!clan, !ping, !health, !reload),
-# optional Google Sheets search, and Render-compatible web binding.
+# strict Google Sheets data source (NO FALLBACK), and Render-compatible web binding.
 #
 # Requires: discord.py v2.x, aiohttp
 # Optional: gspread (if using Google Sheets)
@@ -15,7 +15,7 @@ from typing import List, Dict, Optional, Sequence
 
 import discord
 from discord.ext import commands
-from discord.ui import View, button, Button, Select, SelectOption, Modal, TextInput
+from discord.ui import View, button, Button, Select, SelectOption
 from aiohttp import web
 
 # ---------------- Logging ----------------
@@ -25,7 +25,7 @@ log = logging.getLogger("matchmaker")
 # ---------------- ENV ----------------
 TOKEN = os.environ.get("DISCORD_TOKEN")  # required
 
-# Panel timeout (mins shown in UI)
+# Panel timeout
 PANEL_TIMEOUT_SECONDS = int(os.environ.get("PANEL_TIMEOUT_SECONDS", "600"))  # default 10 min
 
 # THREADS: default "fixed" (spawn panel in a known thread)
@@ -34,7 +34,7 @@ PANEL_THREAD_MODE = os.environ.get("PANEL_THREAD_MODE", "fixed").lower()
 PANEL_FIXED_THREAD_ID = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0"))      # required when fixed
 PANEL_BOUNCE_DELETE_SECONDS = int(os.environ.get("PANEL_BOUNCE_DELETE_SECONDS", "600"))  # pointer lifetime + command delete
 
-# Google Sheets (optional; fallback to demo data if not set)
+# Google Sheets (strict; no fallback)
 GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 CLANS_WORKSHEET_NAME = os.environ.get("CLANS_WORKSHEET_NAME", "Clans")
@@ -49,17 +49,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============================================================
-#                       DATA ACCESS
+#                       DATA ACCESS (STRICT)
 # ============================================================
-
-def _fallback_demo_data() -> List[Dict]:
-    return [
-        {"Name": "Martyrs", "Tag": "MTR", "ClanBoss": "UNM", "Hydra": "Hard", "Chimera": "Normal", "CvC": "High", "Siege": "Wins", "Roster": "All", "Playstyle": "Semi-Competitive", "Vibe": "Piratey, fun-first"},
-        {"Name": "Vagrants", "Tag": "VAG", "ClanBoss": "NM", "Hydra": "Normal", "Chimera": "Normal", "CvC": "Medium", "Siege": "Solid", "Roster": "All", "Playstyle": "Chill", "Vibe": "Daily hitters"},
-        {"Name": "Elders", "Tag": "ELD", "ClanBoss": "UNM", "Hydra": "Brutal", "Chimera": "Hard", "CvC": "High", "Siege": "Strong", "Roster": "Endgame", "Playstyle": "Competitive", "Vibe": "Kind tryhards"},
-        {"Name": "Balors", "Tag": "BAL", "ClanBoss": "UNM", "Hydra": "Brutal", "Chimera": "Hard", "CvC": "High", "Siege": "Top", "Roster": "Endgame", "Playstyle": "Competitive", "Vibe": "Bring your best"},
-        {"Name": "Island Sacred", "Tag": "ISL", "ClanBoss": "NM", "Hydra": "Normal", "Chimera": "Normal", "CvC": "Medium", "Siege": "Good", "Roster": "Mixed", "Playstyle": "Teaching", "Vibe": "Island vibes"},
-    ]
 
 def _normalize(s: Optional[str]) -> str:
     return (s or "").strip()
@@ -80,8 +71,14 @@ def _safe_get(row: Dict[str, str], *keys: str) -> str:
     return ""
 
 def fetch_clans_raw() -> List[Dict]:
+    """
+    Strict data source: Google Sheets only.
+    - If credentials/ID are missing -> raise RuntimeError('DATA_SOURCE_MISCONFIGURED')
+    - If Sheets access fails -> raise RuntimeError('DATA_SOURCE_UNAVAILABLE')
+    """
     if not USE_GSHEETS:
-        return _fallback_demo_data()
+        log.error("Clan data source misconfigured: set GSPREAD_CREDENTIALS and GOOGLE_SHEET_ID (and CLANS_WORKSHEET_NAME).")
+        raise RuntimeError("DATA_SOURCE_MISCONFIGURED")
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -93,8 +90,8 @@ def fetch_clans_raw() -> List[Dict]:
         ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(CLANS_WORKSHEET_NAME)
         return ws.get_all_records()
     except Exception as e:
-        log.exception("Sheets read failed; using demo data: %s", e)
-        return _fallback_demo_data()
+        log.exception("Clan data source unavailable: %s", e)
+        raise RuntimeError("DATA_SOURCE_UNAVAILABLE") from e
 
 def filter_rows(rows: List[Dict], f: Dict) -> List[Dict]:
     """
@@ -212,7 +209,7 @@ def can_control(inter: discord.Interaction, owner_id: int) -> bool:
         return True
     return False
 
-# --- Dropdowns & chip buttons (match your screenshot flow) ---
+# Dropdowns & chip buttons
 
 CB_LEVELS = ["", "Easy", "Normal", "Hard", "Brutal", "NM", "UNM"]
 HYDRA_LEVELS = ["", "Normal", "Hard", "Brutal", "Nightmare"]
@@ -418,7 +415,15 @@ class MatchmakerView(View):
         await self._wipe_results()
         await inter.response.defer(thinking=True)
 
-        rows = fetch_clans_raw()
+        try:
+            rows = fetch_clans_raw()
+        except RuntimeError as err:
+            code = str(err)
+            msg = ("Clan data source not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
+                   if code == "DATA_SOURCE_MISCONFIGURED"
+                   else "Clan data source is temporarily unavailable. Please try again later.")
+            return await inter.followup.send(msg, ephemeral=True)
+
         filters = {
             "clanboss": self.clanboss,
             "hydra": self.hydra,
@@ -433,6 +438,7 @@ class MatchmakerView(View):
         embeds = render_results_to_embeds(results, label)
 
         try:
+            # One message containing all embeds → no per-clan spam
             msg = await inter.channel.send(embeds=embeds)
             self.results_message = msg
             await inter.followup.send(f"Posted **{len(results)}** result(s) in a single message.", ephemeral=True)
@@ -510,7 +516,6 @@ class MatchmakerView(View):
                 pass
             self.results_message = None
 
-    # public close button (optional; uncomment if you want it visible)
     @button(label="Close", style=discord.ButtonStyle.secondary, emoji="🛑")
     async def btn_close(self, inter: discord.Interaction, btn: Button):
         if not can_control(inter, self.owner_id):
@@ -546,9 +551,16 @@ async def clanmatch(ctx: commands.Context):
 
 @bot.command(name="clansearch", help="Quick text search for clans. Usage: !clansearch <text>")
 async def clansearch(ctx: commands.Context, *, query: str = ""):
-    rows = fetch_clans_raw()
+    try:
+        rows = fetch_clans_raw()
+    except RuntimeError as err:
+        code = str(err)
+        msg = ("Clan data source not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
+               if code == "DATA_SOURCE_MISCONFIGURED"
+               else "Clan data source is temporarily unavailable. Please try again later.")
+        return await ctx.send(msg)
+
     if not query:
-        # show a handful
         results = rows[:10]
         qlabel = ""
     else:
@@ -559,7 +571,15 @@ async def clansearch(ctx: commands.Context, *, query: str = ""):
 
 @bot.command(name="clanprofile", aliases=["clan"], help="Show one clan’s profile by name or tag. Usage: !clan <tag|name>")
 async def clanprofile(ctx: commands.Context, *, ident: str):
-    rows = fetch_clans_raw()
+    try:
+        rows = fetch_clans_raw()
+    except RuntimeError as err:
+        code = str(err)
+        msg = ("Clan data source not configured. Admins: set GSPREAD_CREDENTIALS & GOOGLE_SHEET_ID & CLANS_WORKSHEET_NAME."
+               if code == "DATA_SOURCE_MISCONFIGURED"
+               else "Clan data source is temporarily unavailable. Please try again later.")
+        return await ctx.send(msg)
+
     ident_l = ident.lower().strip()
     best = None
 
@@ -587,7 +607,6 @@ async def clanprofile(ctx: commands.Context, *, ident: str):
         title=f"{name}" + (f" [{tag}]" if tag else ""),
         color=discord.Color.blue()
     )
-    # dump known fields nicely
     for k in ("ClanBoss","Hydra","Chimera","CvC","Siege","Roster","Playstyle","Vibe"):
         v = _safe_get(best, k)
         if v:
