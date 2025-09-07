@@ -36,7 +36,7 @@ BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_
 # Padded-emoji tunables
 EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
 EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
-STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: no raw fallback
+STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: stick to padded only
 
 if not CREDS_JSON:
     print("[boot] GSPREAD_CREDENTIALS missing", flush=True)
@@ -52,24 +52,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
 COOLDOWN_SEC = 2.0
-
-@bot.command(name="ping")
-async def ping_cmd(ctx: commands.Context):
-    beat = round(bot.latency * 1000)
-    secs = int(time.time() - START_TS)
-    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
-    await ctx.reply(f"Pong! `{beat}ms` • up `{uptime}`", mention_author=False)
-
-@bot.command(name="health")
-async def health_cmd(ctx: commands.Context):
-    try:
-        ws = get_ws(False); _ = ws.row_values(1)
-        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
-    except Exception as e:
-        sheets_status = f"ERROR: {e}"
-    secs = int(time.time() - START_TS)
-    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
-    await ctx.reply(f"Matchmaker up `{uptime}` • Sheets: {sheets_status}", mention_author=False)
 
 @bot.event
 async def on_ready():
@@ -237,9 +219,8 @@ def resolve_thumb_url(guild: discord.Guild | None, tag: str | None) -> str | Non
     raw = str(emj.url)
     if STRICT_EMOJI_PROXY:
         padded = padded_emoji_url(guild, tag)
-        return padded or None
-    return raw
-
+        return padded or None  # strict: only use padded if available
+    return raw  # non-strict: always show icon via raw URL
 
 # ------------------- Discord bot state -------------------
 def _cooldown_ok(user_id: int) -> bool:
@@ -273,15 +254,17 @@ def panel_intro(spawn_cmd: str, owner_mention: str, private: bool = False) -> st
         lines.append(f"⚠️ Only they can use this panel. Not yours? Type **{cmd}** to get your own.")
     return "\n".join(lines)
 
+# ---------- Entry Criteria (uses sheet header labels V..AB) ----------
 def build_entry_criteria_classic(row) -> str:
     """
     Build the 'Entry Criteria' block using the sheet's headers (V..AB),
-    so labels match the tab exactly. Appends Requirements/Notes if present.
+    so labels always match the tab exactly. Appends Requirements/Notes if present.
     """
     rows = get_rows(False)
     headers = rows[0] if rows and len(rows) > 0 else []
 
     lines = ["**Entry Criteria:**"]
+    # Columns V..AB inclusive
     for idx in range(IDX_V, IDX_AB + 1):
         val = (row[idx] if idx < len(row) else "") or ""
         val = val.strip()
@@ -293,6 +276,7 @@ def build_entry_criteria_classic(row) -> str:
         else:
             lines.append(val)
 
+    # Optional add-ons
     req = (row[IDX_AE_REQUIREMENTS] if len(row) > IDX_AE_REQUIREMENTS else "") or ""
     comments = (row[IDX_AD_COMMENTS] if len(row) > IDX_AD_COMMENTS else "") or ""
     if req.strip():
@@ -302,7 +286,7 @@ def build_entry_criteria_classic(row) -> str:
 
     return "\n".join(lines)
 
-
+# ---------- Embeds ----------
 def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild) -> discord.Embed:
     clan = (row[COL_B_CLAN] or "").strip() or "—"
     tag  = (row[COL_C_TAG] or "").strip()
@@ -336,10 +320,10 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild) -> 
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
-    # resilient thumbnail: padded → raw fallback
+    # thumbnail (padded if strict+proxy, else raw)
     thumb = resolve_thumb_url(guild, tag)
-if thumb:
-    e.set_thumbnail(url=thumb)
+    if thumb:
+        e.set_thumbnail(url=thumb)
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
@@ -364,14 +348,10 @@ def make_embed_for_row_search(row, _filters_text: str, guild: discord.Guild) -> 
 
     e = discord.Embed(title=title, description="\n".join(lines))
 
-    # resilient thumbnail: padded → raw fallback
-    thumb = padded_emoji_url(guild, tag)
     thumb = resolve_thumb_url(guild, tag)
-if thumb:
-    e.set_thumbnail(url=thumb)
+    if thumb:
+        e.set_thumbnail(url=thumb)
 
-
-    # hint so 💡 can flip to Entry Criteria
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
@@ -404,10 +384,9 @@ def make_embed_for_profile(row, _filters_text: str, guild: discord.Guild) -> dis
 
     e = discord.Embed(title=title, description="\n".join(parts))
 
-    thumb = padded_emoji_url(guild, tag)
     thumb = resolve_thumb_url(guild, tag)
-if thumb:
-    e.set_thumbnail(url=thumb)
+    if thumb:
+        e.set_thumbnail(url=thumb)
 
     e.set_footer(text="React with 💡 to flip back to Entry Criteria")
     return e
@@ -452,16 +431,16 @@ class ClanMatchView(discord.ui.View):
 
         self.message: discord.Message | None = None
 
-        # UI components (kept minimal but functional)
-        self.add_item(self.CBSelect(self))
-        self.add_item(self.HydraSelect(self))
-        self.add_item(self.ChimeraSelect(self))
-        self.add_item(self.PlaystyleInput(self))
-        self.add_item(self.CvCButtons(self))
-        self.add_item(self.SiegeButtons(self))
-        self.add_item(self.RosterButtons(self))
-        self.add_item(self.SearchBtn(self))
-        self.add_item(self.ResetBtn(self))
+        # UI components
+        self.add_item(self.CBSelect(self))       # row 0
+        self.add_item(self.HydraSelect(self))    # row 0
+        self.add_item(self.ChimeraSelect(self))  # row 0
+        self.add_item(self.PlaystyleInput(self)) # row 1
+        self.add_item(self.CvCButtons(self))     # row 2 (3 buttons)
+        self.add_item(self.SiegeButtons(self))   # row 3 (3 buttons)
+        self.add_item(self.RosterButtons(self))  # row 4 (3 buttons)
+        self.add_item(self.SearchBtn(self))      # row 4 (1 button)
+        self.add_item(self.ResetBtn(self))       # row 4 (1 button)
 
     # ----- UI inner classes -----
     class CBSelect(discord.ui.Select):
@@ -515,32 +494,32 @@ class ClanMatchView(discord.ui.View):
             self._parent.cvc = 0; await itx.response.defer()
     class SiegeButtons(discord.ui.Item):
         def __init__(self, view:"ClanMatchView"):
-            super().__init__(row=2); self._parent = view
-        async def callback(self, _): pass
-        async def refresh_message(self): pass
-        def view(self): return self._parent
-        @discord.ui.button(label="Siege —", style=discord.ButtonStyle.secondary, row=2)
-        async def siege_any(self, itx: discord.Interaction, _btn: discord.ui.Button):
-            self._parent.siege = None; await itx.response.defer()
-        @discord.ui.button(label="Siege Yes", style=discord.ButtonStyle.secondary, row=2)
-        async def siege_yes(self, itx: discord.Interaction, _btn: discord.ui.Button):
-            self._parent.siege = 1; await itx.response.defer()
-        @discord.ui.button(label="Siege No", style=discord.ButtonStyle.secondary, row=2)
-        async def siege_no(self, itx: discord.Interaction, _btn: discord.ui.Button):
-            self._parent.siege = 0; await itx.response.defer()
-    class RosterButtons(discord.ui.Item):
-        def __init__(self, view:"ClanMatchView"):
             super().__init__(row=3); self._parent = view
         async def callback(self, _): pass
         async def refresh_message(self): pass
         def view(self): return self._parent
-        @discord.ui.button(label="Roster All", style=discord.ButtonStyle.secondary, row=3)
+        @discord.ui.button(label="Siege —", style=discord.ButtonStyle.secondary, row=3)
+        async def siege_any(self, itx: discord.Interaction, _btn: discord.ui.Button):
+            self._parent.siege = None; await itx.response.defer()
+        @discord.ui.button(label="Siege Yes", style=discord.ButtonStyle.secondary, row=3)
+        async def siege_yes(self, itx: discord.Interaction, _btn: discord.ui.Button):
+            self._parent.siege = 1; await itx.response.defer()
+        @discord.ui.button(label="Siege No", style=discord.ButtonStyle.secondary, row=3)
+        async def siege_no(self, itx: discord.Interaction, _btn: discord.ui.Button):
+            self._parent.siege = 0; await itx.response.defer()
+    class RosterButtons(discord.ui.Item):
+        def __init__(self, view:"ClanMatchView"):
+            super().__init__(row=4); self._parent = view
+        async def callback(self, _): pass
+        async def refresh_message(self): pass
+        def view(self): return self._parent
+        @discord.ui.button(label="Roster All", style=discord.ButtonStyle.secondary, row=4)
         async def roster_all(self, itx: discord.Interaction, _btn: discord.ui.Button):
             self._parent.roster_mode = None; await itx.response.defer()
-        @discord.ui.button(label="Roster Open", style=discord.ButtonStyle.secondary, row=3)
+        @discord.ui.button(label="Roster Open", style=discord.ButtonStyle.secondary, row=4)
         async def roster_open(self, itx: discord.Interaction, _btn: discord.ui.Button):
             self._parent.roster_mode = 1; await itx.response.defer()
-        @discord.ui.button(label="Roster Full", style=discord.ButtonStyle.secondary, row=3)
+        @discord.ui.button(label="Roster Full", style=discord.ButtonStyle.secondary, row=4)
         async def roster_full(self, itx: discord.Interaction, _btn: discord.ui.Button):
             self._parent.roster_mode = 0; await itx.response.defer()
     class SearchBtn(discord.ui.Button):
@@ -569,11 +548,6 @@ class ClanMatchView(discord.ui.View):
             f"⚠️ This panel isn’t yours. Type **{cmd}** to summon your own.", ephemeral=True
         )
         return False
-
-    @discord.ui.button(label="(internal)", style=discord.ButtonStyle.secondary, disabled=True, row=5)
-    async def _ghost(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        try: await itx.response.defer()
-        except InteractionResponded: pass
 
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
@@ -813,6 +787,24 @@ async def reload_cache_cmd(ctx):
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
     await _safe_delete(ctx.message)
 
+@bot.command(name="ping")
+async def ping_cmd(ctx: commands.Context):
+    beat = round(bot.latency * 1000)
+    secs = int(time.time() - START_TS)
+    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
+    await ctx.reply(f"Pong! `{beat}ms` • up `{uptime}`", mention_author=False)
+
+@bot.command(name="health")
+async def health_cmd(ctx: commands.Context):
+    try:
+        ws = get_ws(False); _ = ws.row_values(1)
+        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
+    except Exception as e:
+        sheets_status = f"ERROR: {e}"
+    secs = int(time.time() - START_TS)
+    uptime = f"{secs//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}"
+    await ctx.reply(f"Matchmaker up `{uptime}` • Sheets: {sheets_status}", mention_author=False)
+
 # ------------------- HTTP mini-server (emoji pad) -------------------
 async def _health_http(_):
     return web.Response(text="ok")
@@ -896,4 +888,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
