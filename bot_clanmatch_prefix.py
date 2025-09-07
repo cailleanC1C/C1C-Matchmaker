@@ -15,6 +15,13 @@ from google.oauth2.service_account import Credentials
 from aiohttp import web, ClientSession
 from PIL import Image  # Pillow
 
+# Pillow 10+ changed resampling enums; keep compatibility with <10
+try:
+    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS  # Pillow >= 10
+except AttributeError:
+    RESAMPLE_LANCZOS = Image.LANCZOS             # Pillow < 10
+
+
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
 
@@ -334,8 +341,6 @@ class PagedResultsView(discord.ui.View):
         self.message: discord.Message | None = None
         self.results_message: discord.Message | None = None  # last results message we posted
         self._active_view: discord.ui.View | None = None     # last pager view (if any) attached to results
-        self.results_message: discord.Message | None = None  # last posted results bubble
-        self._active_view: discord.ui.View | None = None     # pager attached to that bubble
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user and itx.user.id == self.author_id:
@@ -435,6 +440,9 @@ class ClanMatchView(discord.ui.View):
         self.cvc = None; self.siege = None
         self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
         self.message: discord.Message | None = None  # set after sending
+        self.results_message: discord.Message | None = None  # last results message we posted
+        self._active_view: discord.ui.View | None = None     # pager attached to that message
+
 
     async def on_timeout(self):
         for child in self.children:
@@ -483,79 +491,6 @@ class ClanMatchView(discord.ui.View):
                         child.label = "Roster: Full only"
                         child.style = discord.ButtonStyle.primary
                         
-    async def _maybe_refresh(self, itx: discord.Interaction):
-        """If we already have a results message for !clanmatch, refresh it after criteria changes."""
-        if self.embed_variant != "classic":
-            return
-        if not self.results_message:
-            return
-
-        try:
-            rows = get_rows(False)
-        except Exception:
-            return
-
-        matches = []
-        for row in rows[1:]:
-            try:
-                if is_header_row(row):
-                    continue
-                if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
-                    spots_num = parse_spots_num(row[COL_E_SPOTS])
-                    if self.roster_mode == "open" and spots_num <= 0:
-                        continue
-                    if self.roster_mode == "full" and spots_num > 0:
-                        continue
-                    matches.append(row)
-            except Exception:
-                continue
-
-        if not matches:
-            try:
-                await self.results_message.edit(
-                    content="No matching clans with current filters. Adjust and I’ll update here.",
-                    embeds=[],
-                    view=None
-                )
-            except Exception:
-                pass
-            return
-
-        filters_text = format_filters_footer(
-            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
-        )
-        builder = make_embed_for_row_classic
-
-        total = len(matches)
-        if total <= PAGE_SIZE:
-            embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-            self._active_view = None
-            try:
-                await self.results_message.edit(embeds=embeds, view=None)
-            except Exception:
-                sent = await itx.followup.send(embeds=embeds)
-                self.results_message = sent
-            return
-
-        view = PagedResultsView(
-            author_id=itx.user.id,
-            rows=matches,
-            builder=builder,
-            filters_text=filters_text,
-            guild=itx.guild,
-            timeout=300
-        )
-        embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-        try:
-            await self.results_message.edit(embeds=embeds, view=view)
-            self._active_view = view
-            view.message = self.results_message
-        except Exception:
-            sent = await itx.followup.send(embeds=embeds, view=view)
-            self.results_message = sent
-            self._active_view = view
-            view.message = sent
-
     async def _maybe_refresh(self, itx: discord.Interaction):
         """If we already have a results message for !clanmatch, refresh it after criteria changes."""
         if self.embed_variant != "classic":
@@ -654,9 +589,9 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
-
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
+        
     @discord.ui.select(placeholder="Hydra Difficulty (optional)", min_values=0, max_values=1, row=1,
                        options=[discord.SelectOption(label=o, value=o) for o in HYDRA_CHOICES])
     async def hydra_select(self, itx: discord.Interaction, select: discord.ui.Select):
@@ -664,8 +599,8 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
 
     @discord.ui.select(placeholder="Chimera Difficulty (optional)", min_values=0, max_values=1, row=2,
                        options=[discord.SelectOption(label=o, value=o) for o in CHIMERA_CHOICES])
@@ -674,8 +609,8 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
 
     @discord.ui.select(placeholder="Playstyle (optional)", min_values=0, max_values=1, row=3,
                        options=[discord.SelectOption(label=o, value=o) for o in PLAYSTYLE_CHOICES])
@@ -684,8 +619,8 @@ class ClanMatchView(discord.ui.View):
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
 
     # Row 4: buttons
     def _cycle(self, current):
@@ -699,16 +634,16 @@ class ClanMatchView(discord.ui.View):
         self.cvc = self._cycle(self.cvc); self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Siege: —", style=discord.ButtonStyle.secondary, row=4)
     async def toggle_siege(self, itx: discord.Interaction, button: discord.ui.Button):
         self.siege = self._cycle(self.siege); self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
-                await itx.followup.edit_message(message_id=itx.message.id, view=self)
-                await self._maybe_refresh(itx)
+            await itx.followup.edit_message(message_id=itx.message.id, view=self)
+        await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
@@ -723,7 +658,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
-            await self._maybe_refresh(itx)
+        await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -734,7 +669,7 @@ class ClanMatchView(discord.ui.View):
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
-            await self._maybe_refresh(itx)
+        await self._maybe_refresh(itx)
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4, custom_id="cm_search")
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -1205,7 +1140,7 @@ async def emoji_pad_handler(request: web.Request):
         scale    = target / float(max_side)
         new_w    = max(1, int(w * scale))
         new_h    = max(1, int(h * scale))
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        img = img.resize((new_w, new_h), RESAMPLE_LANCZOS)
 
         canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         x = (size - new_w) // 2
@@ -1251,6 +1186,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
