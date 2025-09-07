@@ -1,5 +1,5 @@
 # bot_clanmatch_prefix.py
-# C1C-Matchmaker — unified result posting, Reset deletion, and reload-on-expire
+# C1C-Matchmaker — unified result posting, Reset deletion, wipe-on-expire, and reload-on-expire
 # Requires: discord.py v2.x
 
 import os
@@ -125,7 +125,7 @@ def build_panel_embed(user: discord.abc.User) -> discord.Embed:
             f"**{user.mention}** has summoned C1C-Matchmaker.\n"
             "🔔 _Only they (or an admin) can use this panel._\n\n"
             "Use **Search** to find clans. **Reset** removes the last result message. **Close** disables the panel.\n"
-            "Panel will auto-expire after some time and show a **Reload new search** button."
+            f"Panel will auto-expire after {PANEL_TIMEOUT_SECONDS//60} minute(s) and show a **Reload new search** button."
         ),
         color=discord.Color.blurple(),
     )
@@ -219,7 +219,6 @@ class ReloadView(View):
         new_view = ClanMatchView(owner_id=self.owner_id, timeout=PANEL_TIMEOUT_SECONDS)
         embed = build_panel_embed(inter.user if inter.user.id == self.owner_id else inter.client.user)
 
-        # If we have a message captured, edit that; else reply
         try:
             if self.message:
                 await self.message.edit(embed=embed, view=new_view)
@@ -239,7 +238,7 @@ class ClanMatchView(View):
     Main interactive panel.
     - Posts ALL search results in ONE message (possibly multi-embed) and keeps a reference.
     - Reset deletes that single results message.
-    - On timeout, disables self and swaps to a 'Reload new search' button.
+    - On timeout, wipes results, disables self, and swaps to a 'Reload new search' button.
     """
     def __init__(self, owner_id: int, timeout: Optional[float] = PANEL_TIMEOUT_SECONDS):
         super().__init__(timeout=timeout)
@@ -320,20 +319,25 @@ class ClanMatchView(View):
     # ---------------- Expiry Handling ----------------
 
     async def on_timeout(self):
-        # View times out server-side; we still can edit the message if we held a reference
+        # On timeout: wipe prior results, then disable and flip to Reload
+        await self._wipe_results()
         try:
             if self.panel_message:
                 for child in self.children:
                     child.disabled = True
-                # Show disabled view immediately, and then swap to ReloadView
+                # Show disabled view immediately, then swap to ReloadView w/ explicit notice
                 await self.panel_message.edit(view=self)
 
                 reload_view = ReloadView(owner_id=self.owner_id)
                 reload_view.message = self.panel_message
-                expired_embed = self.panel_message.embeds[0] if self.panel_message.embeds else build_panel_embed(self.panel_message.author)
+
                 expired = discord.Embed(
-                    title=expired_embed.title or "C1C-Matchmaker Panel",
-                    description="⏳ This panel expired. Click **Reload new search** to start fresh.",
+                    title="C1C-Matchmaker Panel",
+                    description=(
+                        "⏳ This panel expired.\n"
+                        "🧹 Previous search results were **cleared**.\n\n"
+                        "Click **Reload new search** to start fresh."
+                    ),
                     color=discord.Color.greyple()
                 )
                 await self.panel_message.edit(embed=expired, view=reload_view)
@@ -341,7 +345,8 @@ class ClanMatchView(View):
             log.debug("on_timeout edit failed (message likely gone): %s", e)
 
     async def _expire_to_reload(self, inter: discord.Interaction):
-        # Manual close mirrors timeout behavior
+        # Manual close mirrors timeout behavior (also wipe results)
+        await self._wipe_results()
         try:
             for child in self.children:
                 child.disabled = True
@@ -351,7 +356,11 @@ class ClanMatchView(View):
             reload_view.message = self.panel_message or inter.message
             expired = discord.Embed(
                 title="C1C-Matchmaker Panel",
-                description="Panel closed. Click **Reload new search** to start fresh.",
+                description=(
+                    "Panel closed by a controller.\n"
+                    "🧹 Previous search results were **cleared**.\n\n"
+                    "Click **Reload new search** to start fresh."
+                ),
                 color=discord.Color.greyple()
             )
             await (self.panel_message or inter.message).edit(embed=expired, view=reload_view)
@@ -361,6 +370,15 @@ class ClanMatchView(View):
                 await inter.followup.send("Couldn't close panel (missing perms?).", ephemeral=True)
             except Exception:
                 pass
+
+    async def _wipe_results(self):
+        """Delete the last results message silently, if any."""
+        if self.results_message:
+            try:
+                await self.results_message.delete()
+            except Exception:
+                pass
+            self.results_message = None
 
 
 # ============================================================
