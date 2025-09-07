@@ -1,6 +1,142 @@
 # bot_clanmatch_prefix.py
 # C1C-Matchmaker — panels, search, profiles, emoji padding, and reaction flip (💡)
 
+import os, json, time, asyncio, re, traceback, urllib.parse, io, math
+from collections import defaultdict
+
+import discord
+from discord.ext import commands
+from discord import InteractionResponded
+from discord.utils import get
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+from aiohttp import web, ClientSession
+from PIL import Image  # Pillow
+
+# ------------------- boot/uptime -------------------
+START_TS = time.time()
+
+def _fmt_uptime():
+    secs = int(time.time() - START_TS)
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+# ------------------- ENV -------------------
+CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
+SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+# Public base URL for proxying padded emoji images
+BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
+# Padded-emoji tunables
+EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
+EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
+STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: no raw fallback
+
+# Results per page for multi-card output
+PAGE_SIZE = 10
+
+if not CREDS_JSON:
+    print("[boot] GSPREAD_CREDENTIALS missing", flush=True)
+if not SHEET_ID:
+    print("[boot] GOOGLE_SHEET_ID missing", flush=True)
+print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
+print(f"[boot] BASE_URL={BASE_URL}", flush=True)
+
+# ------------------- Sheets (lazy + cache) -------------------
+_gc = None
+_ws = None
+_cache_rows = None
+_cache_time = 0.0
+CACHE_TTL = 60  # seconds
+
+def get_ws(force: bool = False):
+    """Connect to Google Sheets only when needed."""
+    global _gc, _ws
+    if force:
+        _ws = None
+    if _ws is not None:
+        return _ws
+    creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+    _gc = gspread.authorize(creds)
+    _ws = _gc.open_by_key(SHEET_ID).worksheet(WORKSHEET_NAME)
+    print("[sheets] Connected to worksheet OK", flush=True)
+    return _ws
+
+def get_rows(force: bool = False):
+    """Return all rows with simple 60s cache."""
+    global _cache_rows, _cache_time
+    if force or _cache_rows is None or (time.time() - _cache_time) > CACHE_TTL:
+        ws = get_ws(False)
+        _cache_rows = ws.get_all_values()
+        _cache_time = time.time()
+    return _cache_rows
+
+def clear_cache():
+    global _cache_rows, _cache_time, _ws
+    _cache_rows = None
+    _cache_time = 0.0
+    _ws = None  # reconnect next time
+
+# ------------------- Column map (0-based) -------------------
+COL_A_RANK, COL_B_CLAN, COL_C_TAG, COL_D_LEVEL, COL_E_SPOTS = 0, 1, 2, 3, 4
+COL_F_PROGRESSION, COL_G_LEAD, COL_H_DEPUTIES = 5, 6, 7
+COL_I_CVC_TIER, COL_J_CVC_WINS, COL_K_SIEGE_TIER, COL_L_SIEGE_WINS = 8, 9, 10, 11
+COL_M_CB, COL_N_HYDRA, COL_O_CHIMERA = 12, 13, 14  # ranges text (not filters)
+
+# Filters P–U
+COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16, 17, 18, 19, 20
+
+# Entry Criteria V–AB
+IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
+
+# AC / AD / AE add-ons
+IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
+
+# ------------------- Helpers -------------------
+def norm(s: str) -> str:
+    return (s or "").strip().upper()
+
+def is_header_row(row) -> bool:
+    """Detect and ignore header/label rows that look like CLAN/TAG/Spots."""
+    b = norm(row[COL_B_CLAN]) if len(row) > COL_B_CLAN else ""
+    c = norm(row[COL_C_TAG])  if len(row) > COL_C_TAG  else ""
+    e = norm(row[COL_E_SPOTS]) if len(row) > COL_E_SPOTS else ""
+    return b in {"CLAN", "CLAN NAME"} or c == "TAG" or e == "SPOTS"
+
+TOKEN_MAP = {
+    "EASY":"ESY","NORMAL":"NML","HARD":"HRD","BRUTAL":"BTL","NM":"NM","UNM":"UNM","ULTRA-NIGHTMARE":"UNM"
+}
+def map_token(choice: str) -> str:
+    c = norm(choice)
+    return TOKEN_MAP.get(c, c)
+
+def cell_has_diff(cell_text: str, token: str | None) -> bool:
+    if not token:
+        return True
+    t = map_token(token)
+    c = norm(cell_text)
+    return (t in c or (t == "HRD" and "HARD" in c) or (t == "NML" and "NORMAL" in c) or (t == "BTL" and "BRUTAL" in c))
+
+def cell_equals_10(cell_text: str, expected: str | None) -> bool:
+    if expected is None:
+        return True
+    return (cell_text or "").strip() == expected  # exact 1/0
+
+def playstyle_ok(cell_text: str, value: str | None) -> bool:
+    if not value:
+        return True
+    return norm(value) in norm(cell_text)
+
+def parse_spots_num(cell_text: str) -> in_
+# bot_clanmatch_prefix.py
+# C1C-Matchmaker — panels, search, profiles, emoji padding, and reaction flip (💡)
+
 import os, json, time, asyncio, re, traceback, urllib.parse, io
 from collections import defaultdict
 
@@ -932,4 +1068,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
