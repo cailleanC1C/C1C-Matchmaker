@@ -1144,7 +1144,6 @@ async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc
 
     return fallback
 
-
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
@@ -1203,8 +1202,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
-        return
-
+    
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
         return
@@ -1591,6 +1589,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
