@@ -22,7 +22,7 @@ except AttributeError:
     RESAMPLE_LANCZOS = Image.LANCZOS             # Pillow < 10
     
 from discord.ext import tasks
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timezone, time as dtime, timedelta
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
@@ -902,6 +902,15 @@ def _parse_id_set(env_name: str) -> set[int]:
     print(f"[roles] {env_name} = {sorted(ids)}", flush=True)
     return ids
 
+# --- Cleanup (env) ---
+# Comma/space-separated list of thread/channel IDs to clean.
+CLEANUP_THREAD_IDS = _parse_id_set("CLEANUP_THREAD_IDS")   # e.g. "123, 456"
+
+# How often to run, and how old messages must be to delete (in hours)
+CLEANUP_EVERY_HOURS = float(os.environ.get("CLEANUP_EVERY_HOURS", "24") or "24")
+CLEANUP_AGE_HOURS   = float(os.environ.get("CLEANUP_AGE_HOURS", "24") or "24")
+
+
 RECRUITER_ROLE_IDS = _parse_id_set("RECRUITER_ROLE_IDS")
 LEAD_ROLE_IDS      = _parse_id_set("LEAD_ROLE_IDS")
 ADMIN_ROLE_IDS     = _parse_id_set("ADMIN_ROLE_IDS")  # optional
@@ -1222,7 +1231,20 @@ class ClanMatchView(discord.ui.View):
                 await itx.followup.send("No matching clans found. You might have set too many filter criteria, try again with less, please!", ephemeral=False)
                 responded = True
                 return
+            total_found = len(matches)
+            cap = max(1, SEARCH_RESULTS_SOFT_CAP)
+            if total_found > cap:
+                matches = matches[:cap]
+                cap_note = f"first {cap} of {total_found}"
+            else:
+                cap_note = None
 
+
+filters_text = format_filters_footer(
+    self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+)
+if cap_note:
+    filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
             filters_text = format_filters_footer(
                 self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
             )
@@ -1730,6 +1752,74 @@ async def reload_cache_cmd(ctx):
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
     await _safe_delete(ctx.message)
 
+# ------------------- Scheduled cleanup -------------------
+async def _purge_one_target(channel: discord.abc.Messageable, cutoff_dt: datetime) -> int:
+    """
+    Delete this bot's messages older than cutoff_dt in the given channel/thread.
+    Skips pinned messages. Uses bulk delete where possible.
+    Returns the number of messages deleted.
+    """
+    if not getattr(bot, "user", None):
+        return 0
+
+    # If it's a thread and archived, try to unarchive temporarily so we can purge.
+    if isinstance(channel, discord.Thread) and channel.archived:
+        try:
+            await channel.edit(archived=False, auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080))
+        except Exception:
+            pass
+
+    def _check(m: discord.Message) -> bool:
+        try:
+            return (
+                (m.author.id == bot.user.id) and
+                (not m.pinned) and
+                (m.created_at.replace(tzinfo=timezone.utc) < cutoff_dt)
+            )
+        except Exception:
+            return False
+
+    # Purge up to 1000 recent messages per target (more than enough for daily spam).
+    # Note: bulk delete only works for <14 days old; our default is 24h so it's fine.
+    try:
+        deleted = await channel.purge(limit=1000, check=_check, bulk=True, oldest_first=False)
+        return len(deleted)
+    except Exception:
+        # Fallback: manual pass if purge fails (permissions/rate limits, etc.)
+        count = 0
+        try:
+            async for m in channel.history(limit=1000, oldest_first=False):
+                if _check(m):
+                    try:
+                        await m.delete()
+                        count += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return count
+
+@tasks.loop(hours=CLEANUP_EVERY_HOURS)
+async def scheduled_cleanup():
+    if not CLEANUP_THREAD_IDS:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=CLEANUP_AGE_HOURS)
+    total = 0
+    for cid in CLEANUP_THREAD_IDS:
+        try:
+            ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
+            if ch is None:
+                continue
+            n = await _purge_one_target(ch, cutoff)
+            if n:
+                print(f"[cleanup] Purged {n} messages in {cid} older than {CLEANUP_AGE_HOURS}h", flush=True)
+            total += n
+        except Exception as e:
+            print(f"[cleanup] Failed for {cid}: {type(e).__name__}: {e}", flush=True)
+    if total:
+        print(f"[cleanup] Done. Total deleted: {total}", flush=True)
+
+
 # ------------------- Events -------------------
 @bot.event
 async def on_ready():
@@ -1743,6 +1833,9 @@ async def on_ready():
     # NEW: kick off the daily poster (safe to call repeatedly)
     if not daily_recruiters_update.is_running():
         daily_recruiters_update.start()
+    # Start scheduled cleanup
+    if not scheduled_cleanup.is_running():
+        scheduled_cleanup.start()
 
 # ------------------- Tiny web server + image-pad proxy -------------------
 async def _health_http(_req): return web.Response(text="ok")
@@ -1828,6 +1921,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
