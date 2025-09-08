@@ -119,6 +119,8 @@ IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
 
 # AC / AD / AE add-ons
 IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
+# AF
+IDX_AF_INACTIVES = 31
 
 # ------------------- Helpers -------------------
 def norm(s: str) -> str:
@@ -291,11 +293,14 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     clan     = (row[COL_B_CLAN] or "").strip()
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
+    inactives = (row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "").strip()
     reserved = (row[IDX_AC_RESERVED] or "").strip()
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
     title = f"{clan} `{tag}`  — Spots: {spots}"
+    if inactives:
+        title += f" | Inactives: {inactives}"
     if reserved:
         title += f" | Reserved: {reserved}"
 
@@ -323,6 +328,7 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     c = (row[COL_C_TAG]  or "").strip()
     d = (row[COL_D_LEVEL] or "").strip()
     e_spots = (row[COL_E_SPOTS] or "").strip()
+    inactives = (row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "").strip()
 
     v  = (row[IDX_V]  or "").strip()
     w  = (row[IDX_W]  or "").strip()
@@ -333,7 +339,9 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     ab = (row[IDX_AB] or "").strip()
 
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
-
+    if inactives:
+        title += f" | **Inactives:** {inactives}"
+        
     lines = ["**Entry Criteria:**"]
     if z:
         lines.append(f"Clan Boss: {z}")
@@ -1578,6 +1586,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
