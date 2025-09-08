@@ -736,17 +736,17 @@ class MemberSearchPagedView(discord.ui.View):
             await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
 
     # --- View mode buttons (row 0) ---
-    @discord.ui.button(emoji="📰", label="Lite", style=discord.ButtonStyle.primary, row=0, custom_id="ms_lite")
+    @discord.ui.button(emoji="📇", label="Short view", style=discord.ButtonStyle.primary, row=0, custom_id="ms_lite")
     async def ms_lite(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.mode = "lite"
         await self._edit(itx)
 
-    @discord.ui.button(emoji="✅", label="Entry", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_entry")
+    @discord.ui.button(emoji="📑", label="Entry Criteria", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_entry")
     async def ms_entry(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.mode = "entry"
         await self._edit(itx)
 
-    @discord.ui.button(emoji="👤", label="Profile", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_profile")
+    @discord.ui.button(emoji="🪪", label="Clan Profile", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_profile")
     async def ms_profile(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.mode = "profile"
         await self._edit(itx)
@@ -839,11 +839,20 @@ class SearchResultFlipView(discord.ui.View):
                     child.style = discord.ButtonStyle.primary if self.mode == "entry" else discord.ButtonStyle.secondary
 
     async def _edit(self, itx: discord.Interaction):
+        # Always ack the interaction first (no visible "thinking" bubble)
+        try:
+            await itx.response.defer()  # acknowledge without sending anything
+        except discord.InteractionResponded:
+            pass  # already acknowledged
+
         self._sync_buttons()
         embed = self._build_embed()
+
+        # Edit the message that contains these buttons — in place, no new messages
         try:
-            await itx.response.edit_message(embed=embed, view=self)
-        except InteractionResponded:
+            await itx.message.edit(embed=embed, view=self)
+        except Exception:
+            # Last-resort fallback, still an edit (not a send)
             await itx.followup.edit_message(message_id=itx.message.id, embed=embed, view=self)
 
     @discord.ui.button(emoji="👤", label="See clan profile", style=discord.ButtonStyle.secondary, custom_id="sr_profile")
@@ -1819,5 +1828,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
