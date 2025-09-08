@@ -1219,7 +1219,7 @@ class ClanMatchView(discord.ui.View):
                     continue
 
             if not matches:
-                await itx.followup.send("No matching clans found. Try a different combo.", ephemeral=False)
+                await itx.followup.send("No matching clans found. You might have set too many filter criteria, try again with less, please!", ephemeral=False)
                 responded = True
                 return
 
@@ -1828,6 +1828,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
