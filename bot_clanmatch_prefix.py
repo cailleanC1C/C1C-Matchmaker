@@ -376,6 +376,41 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
 
+# ---- NEW: member 'lite' card + profile-with-filters footer ----
+def make_embed_for_row_lite(row, _filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
+    """Slim member-facing card: name/tag/level/rank on one line; progression|style on the next."""
+    name  = (row[COL_B_CLAN] or "").strip()
+    tag   = (row[COL_C_TAG]  or "").strip()
+    lvl   = (row[COL_D_LEVEL] or "").strip()
+    rank_raw = (row[COL_A_RANK] or "").strip()
+    rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
+
+    progression = (row[COL_F_PROGRESSION] or "").strip()
+    style       = (row[COL_U_STYLE]       or "").strip()
+    tail = " | ".join([p for p in [progression, style] if p]) or "—"
+
+    title = f"{name} | {tag} | **Level** {lvl} | **Global Rank** {rank}"
+    e = discord.Embed(title=title, description=tail)
+
+    thumb = padded_emoji_url(guild, tag)
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, tag)
+        if em:
+            e.set_thumbnail(url=str(em.url))
+    return e
+
+
+def make_embed_for_profile_member(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
+    """Same profile as !clan, but footer shows the filters instead of the 💡 hint."""
+    e = make_embed_for_profile(row, guild)
+    if filters_text:
+        e.set_footer(text=f"Filters used: {filters_text}")
+    else:
+        e.set_footer(text="")
+    return e
+
 # ------------------- Recruiters daily summary helpers -------------------
 
 def _locate_summary_headers(rows):
@@ -628,6 +663,78 @@ class PagedResultsView(discord.ui.View):
                 await self.message.edit(embeds=embeds, view=self)
         except Exception:
             pass
+            
+class SearchResultFlipView(discord.ui.View):
+    """
+    Member-facing buttons that flip a single search result between:
+    - lite overview (default)
+    - full clan profile
+    - entry criteria
+    Owner-locked to the member who opened the panel.
+    """
+    def __init__(self, *, author_id: int, row, filters_text: str, guild: discord.Guild | None, timeout: float = 900):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.row = row
+        self.filters_text = filters_text
+        self.guild = guild
+        self.mode = "lite"   # "lite" | "profile" | "entry"
+        self.message: discord.Message | None = None
+        self._sync_buttons()
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user and itx.user.id == self.author_id:
+            return True
+        try:
+            await itx.response.send_message("⚠️ Not your result. Open your own with **!clansearch**.", ephemeral=True)
+        except InteractionResponded:
+            try: await itx.followup.send("⚠️ Not your result. Open your own with **!clansearch**.", ephemeral=True)
+            except Exception: pass
+        return False
+
+    def _build_embed(self) -> discord.Embed:
+        if self.mode == "profile":
+            return make_embed_for_profile_member(self.row, self.filters_text, self.guild)
+        if self.mode == "entry":
+            return make_embed_for_row_search(self.row, self.filters_text, self.guild)
+        return make_embed_for_row_lite(self.row, self.filters_text, self.guild)
+
+    def _sync_buttons(self):
+        # Primary style marks the currently selected detailed view
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "sr_profile":
+                    child.style = discord.ButtonStyle.primary if self.mode == "profile" else discord.ButtonStyle.secondary
+                elif child.custom_id == "sr_entry":
+                    child.style = discord.ButtonStyle.primary if self.mode == "entry" else discord.ButtonStyle.secondary
+
+    async def _edit(self, itx: discord.Interaction):
+        self._sync_buttons()
+        embed = self._build_embed()
+        try:
+            await itx.response.edit_message(embed=embed, view=self)
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embed=embed, view=self)
+
+    @discord.ui.button(emoji="👤", label="See clan profile", style=discord.ButtonStyle.secondary, custom_id="sr_profile")
+    async def profile_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        self.mode = "profile"
+        await self._edit(itx)
+
+    @discord.ui.button(emoji="✅", label="See entry criteria", style=discord.ButtonStyle.secondary, custom_id="sr_entry")
+    async def entry_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        self.mode = "entry"
+        await self._edit(itx)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
+
 
 # ------------------- Reaction flip registry -------------------
 REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel_id, filters}
@@ -980,29 +1087,25 @@ class ClanMatchView(discord.ui.View):
             filters_text = format_filters_footer(
                 self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
             )
-            builder = make_embed_for_row_search if self.embed_variant == "search" else make_embed_for_row_classic
 
+            # --- MEMBER "SEARCH" VARIANT: slim lite card + flip buttons ---
             if self.embed_variant == "search":
                 for r in matches:
-                    embed = builder(r, filters_text, itx.guild)
-                    ft = embed.footer.text or ""
-                    hint = "React with 💡 for Clan Profile"
-                    embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
-                    msg = await itx.followup.send(embed=embed)
+                    lite = make_embed_for_row_lite(r, filters_text, itx.guild)
+                    view = SearchResultFlipView(
+                        author_id=itx.user.id,
+                        row=r,
+                        filters_text=filters_text,
+                        guild=itx.guild,
+                        timeout=900
+                    )
+                    msg = await itx.followup.send(embed=lite, view=view)
+                    view.message = msg
                     responded = True
-                    try:
-                        await msg.add_reaction("💡")
-                    except Exception:
-                        pass
-                    REACT_INDEX[msg.id] = {
-                        "row": r,
-                        "kind": "profile_from_search",
-                        "guild_id": itx.guild_id,
-                        "channel_id": msg.channel.id,
-                        "filters": filters_text,
-                    }
                 return
 
+            # --- RECRUITER "CLASSIC" VARIANT: same as before (paged embeds) ---
+            builder = make_embed_for_row_classic
             total = len(matches)
             if total <= PAGE_SIZE:
                 embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
@@ -1059,6 +1162,7 @@ class ClanMatchView(discord.ui.View):
                 except Exception:
                     pass
 
+
 # ------------------- Help (custom) -------------------
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
@@ -1094,9 +1198,8 @@ async def help_cmd(ctx: commands.Context):
     e.add_field(
         name="For Members",
         value=(
-            "• `!clansearch` — Open the member panel to browse clans by filters and see **Entry Criteria** "
-            "& open spots.\n"
-            "  Tip: On results from `!clansearch`, react with 💡 to flip between **Entry Criteria** and the **Clan Profile**."
+        "• `!clansearch` — Open the member panel. Pick filters and click **Search Clans**.\n"
+        "  Each result shows a slim card; use the buttons **See clan profile** or **See entry criteria** to flip views."
         ),
         inline=False
     )
@@ -1586,31 +1689,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
