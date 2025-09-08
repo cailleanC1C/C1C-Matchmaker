@@ -1225,7 +1225,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     if target_chan != ctx.channel:
         try:
             await ctx.reply(
-                f"{ctx.author.mention} I opened your recruiter panel in {target_chan.mention}. "
+                f"{ctx.author.mention} I opened your recruiter panel in {target_chan.mention}.",
                 mention_author=False,
                 allowed_mentions=allowed,
                 delete_after=60,  # remove/tune if you prefer
@@ -1578,6 +1578,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
