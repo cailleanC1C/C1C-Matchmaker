@@ -1101,7 +1101,7 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
 
 # ------------------- Reaction flip: 💡 -------------------
-@bot.event
+@bot.event@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
         # ignore DMs / self / non-bulb
@@ -1114,43 +1114,39 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if not info:
             return
 
-        guild = bot.get_guild(info["guild_id"]) if info.get("guild_id") else None
+        guild = bot.get_guild(info["guild_id"]) if info.get("guild_id") else bot.get_guild(payload.guild_id)
         channel = bot.get_channel(info["channel_id"]) or await bot.fetch_channel(info["channel_id"])
+        try:
+            msg = await channel.fetch_message(payload.message_id)
+        except Exception:
+            return
+
         row = info["row"]
-        src_msg = await channel.fetch_message(payload.message_id)
 
         if info["kind"] == "entry_from_profile":
-            # Show Entry Criteria from a profile card
+            # Profile → show Entry Criteria in-place
             embed = make_embed_for_row_search(row, info.get("filters", ""), guild)
             ft = embed.footer.text or ""
             hint = "React with 💡 for Clan Profile"
             embed.set_footer(text=(f"{ft} • {hint}" if ft else hint))
 
-            sent = await channel.send(embed=embed, reference=src_msg)
-            try: await sent.add_reaction("💡")
-            except Exception: pass
+            await msg.edit(embed=embed)
+            info["kind"] = "profile_from_search"          # flip the kind for next toggle
+            REACT_INDEX[payload.message_id] = info
 
-            REACT_INDEX[sent.id] = {
-                "row": row,
-                "kind": "profile_from_search",
-                "guild_id": guild.id if guild else None,
-                "channel_id": sent.channel.id,
-                "filters": info.get("filters", ""),
-            }
-
-        else:  # "profile_from_search" → show Profile from an entry-criteria card
+        else:  # "profile_from_search" → show Profile in-place
             embed = make_embed_for_profile(row, guild)
-            sent = await channel.send(embed=embed, reference=src_msg)
-            try: await sent.add_reaction("💡")
-            except Exception: pass
+            await msg.edit(embed=embed)
+            info["kind"] = "entry_from_profile"           # flip back
+            REACT_INDEX[payload.message_id] = info
 
-            REACT_INDEX[sent.id] = {
-                "row": row,
-                "kind": "entry_from_profile",
-                "guild_id": guild.id if guild else None,
-                "channel_id": sent.channel.id,
-                "filters": info.get("filters", ""),
-            }
+        # Let users press 💡 again without removing it manually
+        try:
+            user = payload.member or (guild and guild.get_member(payload.user_id))
+            if user:
+                await msg.remove_reaction(payload.emoji, user)
+        except Exception:
+            pass
 
     except Exception as e:
         print("[react] error:", e)
@@ -1288,6 +1284,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
