@@ -1184,7 +1184,10 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     )
     embed.set_footer(text="Only the summoner can use this panel.")
 
-    key = (ctx.author.id, "classic")
+    # where to post the recruiter panel
+    target_chan = await _resolve_recruiter_panel_channel(ctx)
+
+    key = (ctx.author.id, "search")
     old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
@@ -1200,7 +1203,6 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
-
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
@@ -1232,27 +1234,23 @@ async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
                     "to see Entry Criteria and open Spots."
     )
     embed.set_footer(text="Only the summoner can use this panel.")
-    
-# resolve fixed thread (or fallback to current channel)
-target_chan = await _resolve_recruiter_panel_channel(ctx)
 
+key = (ctx.author.id, "search")
+old_id = ACTIVE_PANELS.get(key)
+if old_id:
+    try:
+        msg = await ctx.channel.fetch_message(old_id)
+        view.message = msg
+        await msg.edit(embed=embed, view=view)
+        await _safe_delete(ctx.message)
+        return
+    except Exception:
+        pass
 
-    key = (ctx.author.id, "search")
-    old_id = ACTIVE_PANELS.get(key)
-    if old_id:
-        try:
-            sent = await target_chan.send(embed=embed, view=view)
-            view.message = msg
-            await msg.edit(embed=embed, view=view)
-            await _safe_delete(ctx.message)
-            return
-        except Exception:
-            pass
-
-    sent = await ctx.reply(embed=embed, view=view, mention_author=False)
-    view.message = sent
-    ACTIVE_PANELS[key] = sent.id
-    await _safe_delete(ctx.message)
+sent = await ctx.reply(embed=embed, view=view, mention_author=False)
+view.message = sent
+ACTIVE_PANELS[key] = sent.id
+await _safe_delete(ctx.message)
 
 # ------------------- Clan profile command -------------------
 def find_clan_row(query: str):
@@ -1553,6 +1551,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
