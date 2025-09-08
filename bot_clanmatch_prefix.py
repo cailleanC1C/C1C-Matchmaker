@@ -1166,7 +1166,6 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     embed.set_footer(text="Only the summoner can use this panel.")
 
     target_chan = await _resolve_recruiter_panel_channel(ctx)
-
     if target_chan is None:
         await ctx.reply("❌ I couldn’t access the configured recruiter thread. "
                         "Check `PANEL_FIXED_THREAD_ID` and my permissions.", mention_author=False)
@@ -1174,25 +1173,57 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         return
 
     print(f"[clanmatch] sending to {getattr(target_chan, 'id', None)} (invoked {ctx.channel.id})", flush=True)
-    # or
-    print(f'[clanmatch] sending to {getattr(target_chan, "id", None)} (invoked {ctx.channel.id})', flush=True)
-
 
     key = (ctx.author.id, "classic")
     old_id = ACTIVE_PANELS.get(key)
+    allowed = discord.AllowedMentions(users=[ctx.author])
+
     if old_id:
         try:
             msg = await target_chan.fetch_message(old_id)
             view.message = msg
             await msg.edit(embed=embed, view=view)
+
+            # If panel lives in a different thread/channel, leave a pointer with a jump link
+            if target_chan != ctx.channel:
+                try:
+                    await ctx.reply(
+                        f"{ctx.author.mention} your recruiter panel is already open in "
+                        f"{target_chan.mention}. Jump to it: {msg.jump_url}",
+                        mention_author=False,
+                        allowed_mentions=allowed,
+                        delete_after=20,  # remove/tune if you want it to persist
+                    )
+                except Exception:
+                    pass
+
             await _safe_delete(ctx.message)
             return
         except Exception:
             pass
 
-    sent = await target_chan.send(embed=embed, view=view)
+    # New panel: ping the opener in the thread and drop a pointer in the invoking channel
+    sent = await target_chan.send(
+        content=(ctx.author.mention if target_chan != ctx.channel else None),
+        embed=embed,
+        view=view,
+        allowed_mentions=allowed,
+    )
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
+
+    if target_chan != ctx.channel:
+        try:
+            await ctx.reply(
+                f"{ctx.author.mention} I opened your recruiter panel in {target_chan.mention}. "
+                f"Jump to it: {sent.jump_url}",
+                mention_author=False,
+                allowed_mentions=allowed,
+                delete_after=20,  # remove/tune if you prefer
+            )
+        except Exception:
+            pass
+
     await _safe_delete(ctx.message)
 
 
@@ -1539,6 +1570,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
