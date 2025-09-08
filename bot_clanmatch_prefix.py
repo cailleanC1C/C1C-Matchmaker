@@ -687,7 +687,7 @@ class ClanMatchView(discord.ui.View):
 
         self.cb = None; self.hydra = None; self.chimera = None; self.playstyle = None
         self.cvc = None; self.siege = None
-        self.roster_mode: str | None = None   # None = All, 'open' = Spots>0, 'full' = Spots<=0
+        self.roster_mode: str | None = "open"   # None = All, 'open' = Spots>0, 'full' = Spots<=0 
         self.message: discord.Message | None = None  # set after sending
         self.results_message: discord.Message | None = None  # last results message we posted
         self._active_view: discord.ui.View | None = None     # pager attached to that message
@@ -730,15 +730,15 @@ class ClanMatchView(discord.ui.View):
                         discord.ButtonStyle.danger if self.siege == "0" else discord.ButtonStyle.secondary
                     )
                 elif child.custom_id == "roster_btn":
-                    if self.roster_mode is None:
-                        child.label = "Roster: All"
-                        child.style = discord.ButtonStyle.secondary
-                    elif self.roster_mode == "open":
-                        child.label = "Roster: Open only"
+                    if self.roster_mode == "open":
+                        child.label = "Open Spots Only"
                         child.style = discord.ButtonStyle.success
-                    else:  # 'full'
-                        child.label = "Roster: Full only"
+                    elif self.roster_mode == "full":
+                        child.label = "Full Only"
                         child.style = discord.ButtonStyle.primary
+                    else:  # Any roster
+                        child.label = "Any Roster"
+                        child.style = discord.ButtonStyle.secondary
                         
     async def _maybe_refresh(self, itx: discord.Interaction):
         """If we already have a results message for !clanmatch, refresh it after criteria changes."""
@@ -894,15 +894,15 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
 
-    @discord.ui.button(label="Roster: All", style=discord.ButtonStyle.secondary, row=4, custom_id="roster_btn")
+    @discord.ui.button(label="Open Spots Only", style=discord.ButtonStyle.success, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
         # Cycle: None -> 'open' -> 'full' -> None
-        if self.roster_mode is None:
-            self.roster_mode = "open"
-        elif self.roster_mode == "open":
+        if self.roster_mode == "open":
+            self.roster_mode = "none"
+        elif self.roster_mode is None:
             self.roster_mode = "full"
         else:
-            self.roster_mode = None
+            self.roster_mode = "open"
         self._sync_visuals()
         try:    await itx.response.edit_message(view=self)
         except InteractionResponded:
@@ -1540,6 +1540,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
