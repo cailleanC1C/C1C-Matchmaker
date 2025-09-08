@@ -457,6 +457,8 @@ REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.remove_command("help")  # we'll provide our own embed help
+
 
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
@@ -825,6 +827,62 @@ class ClanMatchView(discord.ui.View):
                     await itx.followup.send(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
                 except Exception:
                     pass
+
+# ------------------- Help (custom) -------------------
+@bot.command(name="help")
+async def help_cmd(ctx: commands.Context):
+    e = discord.Embed(
+        title="C1C-Matchmaker — Help",
+        description=(
+            "Helps recruiters place new players into the right clan, and lets members "
+            "browse open spots and entry criteria."
+        ),
+        color=discord.Color.blurple()
+    )
+
+    # Thumbnail: C1C emoji (uses the same padded-emoji proxy as result embeds)
+    thumb = padded_emoji_url(ctx.guild, "C1C")
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(ctx.guild, "C1C")
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
+    e.add_field(
+        name="For Recruiters",
+        value=(
+            "• `!clanmatch` — Open the recruiter panel. Pick filters (CB, Hydra, Chimera, "
+            "CvC Yes/No, Siege Yes/No, Playstyle, Roster). Only the person who opens a panel can use it.\n"
+            "• `!clan <tag or name>` — Show a clan **Profile** (level, rank, leadership, "
+            "boss/hydra/chimera ranges, CvC & Siege stats, progression/style)."
+        ),
+        inline=False
+    )
+
+    e.add_field(
+        name="For Members",
+        value=(
+            "• `!clansearch` — Open the member panel to browse clans by filters and see **Entry Criteria** "
+            "& open spots.\n"
+            "  Tip: On results from `!clansearch`, react with 💡 to flip between **Entry Criteria** and the **Clan Profile**."
+        ),
+        inline=False
+    )
+
+    e.add_field(
+        name="Admin / Maintenance",
+        value=(
+            "• `!reload` — Clear the sheet cache (forces fresh data on next search)\n"
+            "• `!health` — Bot & Sheets status (latency, worksheet health, uptime)\n"
+            "• `!ping` — Quick “bot alive” check"
+        ),
+        inline=False
+    )
+
+    e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
+    await ctx.reply(embed=e, mention_author=False)
+
 
 
 # ------------------- Commands: panels -------------------
@@ -1230,6 +1288,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
