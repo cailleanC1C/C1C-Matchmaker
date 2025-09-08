@@ -457,8 +457,56 @@ REACT_INDEX: dict[int, dict] = {}  # message_id -> {row, kind, guild_id, channel
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-bot.remove_command("help")  # we'll provide our own embed help
 
+# ---- Role gates via ENV role IDs -------------------------------------------------
+# Set these env vars to comma/space-separated role IDs, e.g.:
+# RECRUITER_ROLE_IDS="123456789012345678, 234567890123456789"
+# LEAD_ROLE_IDS="345678901234567890"
+# ADMIN_ROLE_IDS="456789012345678901"   # optional extra admin-ish role(s)
+
+def _parse_id_set(env_name: str) -> set[int]:
+    raw = os.environ.get(env_name, "") or ""
+    ids: set[int] = set()
+    for tok in re.split(r"[,\s]+", raw.strip()):
+        if not tok:
+            continue
+        try:
+            ids.add(int(tok))
+        except ValueError:
+            print(f"[roles] WARN: ignoring non-int token in {env_name}: {tok}", flush=True)
+    print(f"[roles] {env_name} = {sorted(ids)}", flush=True)
+    return ids
+
+RECRUITER_ROLE_IDS = _parse_id_set("RECRUITER_ROLE_IDS")
+LEAD_ROLE_IDS      = _parse_id_set("LEAD_ROLE_IDS")
+ADMIN_ROLE_IDS     = _parse_id_set("ADMIN_ROLE_IDS")  # optional
+
+def _has_role_id(member: discord.Member, ids: set[int]) -> bool:
+    if not ids or not isinstance(member, discord.Member):
+        return False
+    return any(getattr(r, "id", None) in ids for r in getattr(member, "roles", []))
+
+def _is_admin_perm(member: discord.Member) -> bool:
+    return bool(getattr(member, "guild_permissions", None) and member.guild_permissions.administrator)
+
+def _allowed_recruiter(member: discord.Member) -> bool:
+    # EXACT spec: recruiters (scout/coordinator IDs) OR admins (perm or ADMIN_ROLE_IDS)
+    return (
+        _has_role_id(member, RECRUITER_ROLE_IDS)
+        or _is_admin_perm(member)
+        or _has_role_id(member, ADMIN_ROLE_IDS)
+    )
+
+def _allowed_admin_or_lead(member: discord.Member) -> bool:
+    # Admin/lead spec for health/reload/ping
+    return (
+        _is_admin_perm(member)
+        or _has_role_id(member, ADMIN_ROLE_IDS)
+        or _has_role_id(member, LEAD_ROLE_IDS)
+    )
+# ----------------------------------------------------------------------------------
+
+bot.remove_command("help")  # we'll provide our own embed help
 
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
@@ -905,6 +953,13 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         await ctx.reply(msg, mention_author=False)
         await _safe_delete(ctx.message)
         return
+        
+    # Permission gate: recruiters (scouts/coordinators) or admins only
+    if not isinstance(ctx.author, discord.Member) or not _allowed_recruiter(ctx.author):
+        await ctx.reply("⚠️ Only **Recruitment Scouts/Coordinators** (or Admins) can use `!clanmatch`.",
+                        mention_author=False)
+        await _safe_delete(ctx.message)
+        return
 
     now = time.time()
     if now - LAST_CALL.get(ctx.author.id, 0) < COOLDOWN_SEC:
@@ -1154,10 +1209,19 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
 async def ping(ctx):
+    # Admin or Recruitment Lead only
+    if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
+        await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!ping`.", mention_author=False)
+        return
     await ctx.send("✅ I’m alive and listening, captain!")
+
 
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
+    # Admin or Recruitment Lead only
+    if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
+        await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!health`.", mention_author=False)
+        return
     try:
         try:
             ws = get_ws(False)
@@ -1174,21 +1238,13 @@ async def health_prefix(ctx: commands.Context):
 
 @bot.command(name="reload")
 async def reload_cache_cmd(ctx):
+    # Admin or Recruitment Lead only
+    if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
+        await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!reload`.", mention_author=False)
+        return
     clear_cache()
     await ctx.send("♻️ Sheet cache cleared. Next search will fetch fresh data.")
     await _safe_delete(ctx.message)
-
-@bot.tree.command(name="health", description="Bot & Sheets status")
-async def health_slash(itx: discord.Interaction):
-    await itx.response.defer(thinking=False, ephemeral=False)
-    try:
-        ws = get_ws(False)
-        _ = ws.row_values(1)
-        sheets_status = f"OK (`{WORKSHEET_NAME}`)"
-    except Exception as e:
-        sheets_status = f"ERROR: {e.__class__.__name__}"
-    latency_ms = int(bot.latency * 1000) if bot.latency else -1
-    await itx.followup.send(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}")
 
 # ------------------- Events -------------------
 @bot.event
@@ -1284,6 +1340,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
