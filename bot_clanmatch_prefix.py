@@ -1198,20 +1198,23 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
 
-
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4, custom_id="cm_search")
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        # NOTE: this is the SAME method we used before, keep it inside the class.
-        if not any([self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode is not None]):
+        # Require at least one filter (roster_mode counts if it's not None)
+        if not any([
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle,
+            self.roster_mode is not None
+        ]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂", ephemeral=True)
             return
 
+        # Acknowledge the click so we can use followup messages
         await itx.response.defer(thinking=True)
 
-        responded = False
         try:
             rows = get_rows(False)
 
+            # Build matches
             matches = []
             for row in rows[1:]:
                 try:
@@ -1228,28 +1231,28 @@ class ClanMatchView(discord.ui.View):
                     continue
 
             if not matches:
-                await itx.followup.send("No matching clans found. You might have set too many filter criteria, try again with less, please!", ephemeral=False)
-                responded = True
+                await itx.followup.send(
+                    "No matching clans found. You might have set too many filter criteria — try again with fewer.",
+                    ephemeral=False
+                )
                 return
+
+            # Soft-cap the number of results we show
             total_found = len(matches)
             cap = max(1, SEARCH_RESULTS_SOFT_CAP)
+            cap_note = None
             if total_found > cap:
                 matches = matches[:cap]
                 cap_note = f"first {cap} of {total_found}"
-            else:
-                cap_note = None
 
-
-filters_text = format_filters_footer(
-    self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
-)
-if cap_note:
-    filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
+            # Footer text describing filters (plus cap note if any)
             filters_text = format_filters_footer(
                 self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
             )
+            if cap_note:
+                filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
 
-            # --- MEMBER "SEARCH" VARIANT: paged single message + global view toggle ---
+            # ----- MEMBER "SEARCH" VARIANT -----
             if self.embed_variant == "search":
                 view = MemberSearchPagedView(
                     author_id=itx.user.id,
@@ -1261,13 +1264,13 @@ if cap_note:
                 embeds = _page_embeds_search(matches, 0, "lite", filters_text, itx.guild)
                 sent = await itx.followup.send(embeds=embeds, view=view)
                 view.message = sent
-                self.results_message = sent  # optional: keeps a handle if you want future refresh
-                responded = True
+                self.results_message = sent
                 return
 
-            # --- RECRUITER "CLASSIC" VARIANT: same as before (paged embeds) ---
+            # ----- RECRUITER "CLASSIC" VARIANT -----
             builder = make_embed_for_row_classic
             total = len(matches)
+
             if total <= PAGE_SIZE:
                 embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
                 self._active_view = None
@@ -1275,17 +1278,15 @@ if cap_note:
                     try:
                         await self.results_message.edit(embeds=embeds, view=None)
                         await itx.followup.send("Results updated.", ephemeral=True)
-                        responded = True
                     except Exception:
                         sent = await itx.followup.send(embeds=embeds)
-                        responded = True
                         self.results_message = sent
                 else:
                     sent = await itx.followup.send(embeds=embeds)
-                    responded = True
                     self.results_message = sent
                 return
 
+            # Paged
             view = PagedResultsView(
                 author_id=itx.user.id,
                 rows=matches,
@@ -1302,26 +1303,22 @@ if cap_note:
                     self._active_view = view
                     view.message = self.results_message
                     await itx.followup.send("Results updated.", ephemeral=True)
-                    responded = True
                 except Exception:
                     sent = await itx.followup.send(embeds=embeds, view=view)
-                    responded = True
                     self.results_message = sent
                     self._active_view = view
                     view.message = sent
             else:
                 sent = await itx.followup.send(embeds=embeds, view=view)
-                responded = True
                 self.results_message = sent
                 self._active_view = view
                 view.message = sent
 
         except Exception as e:
-            if not responded:
-                try:
-                    await itx.followup.send(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
-                except Exception:
-                    pass
+            try:
+                await itx.followup.send(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
+            except Exception:
+                pass
 
 
 # ------------------- Help (custom) -------------------
@@ -1921,6 +1918,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
