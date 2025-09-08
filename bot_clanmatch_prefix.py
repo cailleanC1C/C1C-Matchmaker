@@ -20,7 +20,9 @@ try:
     RESAMPLE_LANCZOS = Image.Resampling.LANCZOS  # Pillow >= 10
 except AttributeError:
     RESAMPLE_LANCZOS = Image.LANCZOS             # Pillow < 10
-
+    
+from discord.ext import tasks
+from datetime import datetime, timezone, time as dtime
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
@@ -54,6 +56,12 @@ if not SHEET_ID:
     print("[boot] GOOGLE_SHEET_ID missing", flush=True)
 print(f"[boot] WORKSHEET_NAME={WORKSHEET_NAME}", flush=True)
 print(f"[boot] BASE_URL={BASE_URL}", flush=True)
+
+# ---- Recruiters daily summary target + role mentions ----
+RECRUITERS_THREAD_ID = int(os.environ.get("RECRUITERS_THREAD_ID", "0") or "0")
+ROLE_ID_RECRUITMENT_COORDINATOR = int(os.environ.get("ROLE_ID_RECRUITMENT_COORDINATOR", "0") or "0")
+ROLE_ID_RECRUITMENT_SCOUT       = int(os.environ.get("ROLE_ID_RECRUITMENT_SCOUT", "0") or "0")
+
 
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
@@ -352,6 +360,150 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
+
+# ------------------- Recruiters daily summary helpers -------------------
+
+def _locate_summary_headers(rows):
+    """
+    Finds the row that contains the headers: 'open spots', 'inactives', 'reserved spots'.
+    Returns (header_row_index, open_idx, inactive_idx, reserved_idx) or (None, None, None, None)
+    """
+    for i, r in enumerate(rows[:80]):  # search early part of the sheet
+        lower = [(c or "").strip().lower() for c in r]
+        if "open spots" in lower and "inactives" in lower and "reserved spots" in lower:
+            return (
+                i,
+                lower.index("open spots"),
+                lower.index("inactives"),
+                lower.index("reserved spots"),
+            )
+    # fallback to the screenshot layout (F,G,H)
+    return (None, 5, 6, 7)
+
+def _first_nonempty_cell_lower(row):
+    for c in row:
+        if (c or "").strip():
+            return (c or "").strip().lower()
+    return ""
+
+def _get_line_values(rows, start_row, label_norm, open_idx, inact_idx, reserve_idx):
+    """
+    Find a row whose first non-empty cell matches label_norm and return tuple of ints (open, inactive, reserved).
+    Search from start_row onward; returns (0,0,0) if not found or not parseable.
+    """
+    def _to_int(x):
+        try: return int(re.search(r"-?\d+", (x or "")).group())
+        except Exception: return 0
+
+    for r in rows[start_row: start_row + 60]:
+        first = _first_nonempty_cell_lower(r)
+        if first == label_norm:
+            return (
+                _to_int(r[open_idx] if len(r) > open_idx else ""),
+                _to_int(r[inact_idx] if len(r) > inact_idx else ""),
+                _to_int(r[reserve_idx] if len(r) > reserve_idx else ""),
+            )
+    return (0, 0, 0)
+
+def read_recruiter_summary():
+    """
+    Reads the small summary table:
+      overall / top10 / top5
+      Elite End Game ... Beginners
+    Returns a dict: key -> (open, inactives, reserved)
+    """
+    rows = get_rows(False)
+    hdr_row, open_idx, inact_idx, reserve_idx = _locate_summary_headers(rows)
+    start = (hdr_row + 1) if hdr_row is not None else 0
+
+    labels = [
+        ("overall", "overall"),
+        ("top10", "top10"),
+        ("top5", "top5"),
+        ("elite end game", "Elite End Game"),
+        ("early end game", "Early End Game"),
+        ("late game", "Late Game"),
+        ("mid game", "Mid Game"),
+        ("early game", "Early Game"),
+        ("beginners", "Beginners"),
+    ]
+    out = {}
+    for key_norm, _pretty in labels:
+        out[key_norm] = _get_line_values(rows, start, key_norm, open_idx, inact_idx, reserve_idx)
+    return out
+
+def build_recruiters_summary_embed(guild: discord.Guild | None) -> discord.Embed:
+    data = read_recruiter_summary()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    lines = []
+    lines.append("**Summary open spots:**")
+    for key_norm, pretty in [
+        ("overall", "overall"),
+        ("top10",   "Top10"),
+        ("top5",    "Top 5"),
+    ]:
+        o, ina, res = data.get(key_norm, (0,0,0))
+        lines.append(f"{pretty}:   open {o} | inactives {ina} | reserved {res}")
+
+    lines.append("")
+    lines.append("**per Bracket:**")
+    for key_norm, pretty in [
+        ("elite end game", "Elite End Game"),
+        ("early end game", "Early End Game"),
+        ("late game",      "Late Game"),
+        ("mid game",       "Mid Game"),
+        ("early game",     "Early Game"),
+        ("beginners",      "Beginners"),
+    ]:
+        o, ina, res = data.get(key_norm, (0,0,0))
+        lines.append(f"{pretty}:   open {o} | inactives {ina} | reserved {res}")
+
+    e = discord.Embed(title=f"Update {today}", description="\n".join(lines))
+
+    # thumbnail with the C1C emoji (same padding proxy as other embeds)
+    thumb = padded_emoji_url(guild, "C1C")
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, "C1C")
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
+    return e
+
+# ------------------- Daily poster (14:00 UTC) -------------------
+
+POST_TIME_UTC = dtime(hour=14, minute=0, tzinfo=timezone.utc)
+
+@tasks.loop(time=POST_TIME_UTC)
+async def daily_recruiters_update():
+    try:
+        if not RECRUITERS_THREAD_ID:
+            print("[daily] RECRUITERS_THREAD_ID not set; skipping.")
+            return
+
+        # fetch thread (works for threads and channels)
+        thread = bot.get_channel(RECRUITERS_THREAD_ID) or await bot.fetch_channel(RECRUITERS_THREAD_ID)
+        if thread is None:
+            print(f"[daily] Could not fetch thread {RECRUITERS_THREAD_ID}")
+            return
+
+        embed = build_recruiters_summary_embed(getattr(thread, "guild", None))
+
+        # build the mentions as message content (lines exactly as requested)
+        parts = [f"Update {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"]
+        if ROLE_ID_RECRUITMENT_COORDINATOR:
+            parts.append(f"<@&{ROLE_ID_RECRUITMENT_COORDINATOR}>")
+        if ROLE_ID_RECRUITMENT_SCOUT:
+            parts.append(f"<@&{ROLE_ID_RECRUITMENT_SCOUT}>")
+        content = "\n".join(parts)
+
+        await thread.send(content=content, embed=embed)
+
+    except Exception as e:
+        print(f"[daily] post failed: {type(e).__name__}: {e}")
+
 
 # ----------- Multi-card paging helpers (for !clanmatch only) -----------
 def _page_embeds(rows, page_index, builder, filters_text, guild):
@@ -1256,6 +1408,10 @@ async def on_ready():
     except Exception as e:
         print(f"[slash] sync failed: {e}", flush=True)
 
+    # NEW: kick off the daily poster (safe to call repeatedly)
+    if not daily_recruiters_update.is_running():
+        daily_recruiters_update.start()
+
 # ------------------- Tiny web server + image-pad proxy -------------------
 async def _health_http(_req): return web.Response(text="ok")
 
@@ -1340,6 +1496,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
