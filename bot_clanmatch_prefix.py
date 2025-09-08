@@ -896,29 +896,33 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Open Spots Only", style=discord.ButtonStyle.success, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
-        # Cycle: None -> 'open' -> 'full' -> None
+        # Cycle: 'open' → None (any) → 'full' → 'open'
         if self.roster_mode == "open":
-            self.roster_mode = "none"
+            self.roster_mode = None
         elif self.roster_mode is None:
             self.roster_mode = "full"
         else:
             self.roster_mode = "open"
         self._sync_visuals()
-        try:    await itx.response.edit_message(view=self)
+        try:
+            await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
+
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.cb = self.hydra = self.chimera = self.playstyle = None
         self.cvc = self.siege = None
-        self.roster_mode = None
+        self.roster_mode = "open"  # reset to default (Open Spots Only)
         self._sync_visuals()
-        try:    await itx.response.edit_message(view=self)
+        try:
+            await itx.response.edit_message(view=self)
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
+
 
     @discord.ui.button(label="Search Clans", style=discord.ButtonStyle.primary, row=4, custom_id="cm_search")
     async def search(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -1099,50 +1103,35 @@ async def _safe_delete(message: discord.Message):
     except Exception:
         pass
 
-async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc.Messageable:
+async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc.Messageable | None:
     """
     Returns the channel/thread where !clanmatch panels should live.
     If PANEL_THREAD_MODE=fixed and PANEL_FIXED_THREAD_ID is valid, use that thread.
-    Falls back to the invoking channel on any error.
+    In fixed mode, never fall back to the invoking channel.
     """
-    # default: same place where command was used
-    fallback = ctx.channel
-
+    # SAME mode → always the invoking channel
     if PANEL_THREAD_MODE != "fixed" or not PANEL_FIXED_THREAD_ID:
-        return fallback
+        return ctx.channel
 
     try:
         dest = bot.get_channel(PANEL_FIXED_THREAD_ID) or await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
-        # Make sure it's a thread and keep it alive
+        # Must be a thread in FIXED mode
         if isinstance(dest, discord.Thread):
             if dest.archived:
                 try:
-                    await dest.edit(archived=False, auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080))
+                    await dest.edit(
+                        archived=False,
+                        auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080),
+                    )
                 except Exception:
-                    # best-effort; continue even if we can’t edit
-                    pass
+                    pass  # best effort if we can't unarchive/extend
             return dest
-        # If someone accidentally supplied a text channel ID, just use that channel
-        if isinstance(dest, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.ForumChannel)):
-            return dest
+        # Not a thread → treat as error in FIXED mode (no fallback)
+        print(f"[panel-thread] FIXED mode id {PANEL_FIXED_THREAD_ID} is not a thread; refusing to fallback.", flush=True)
+        return None
     except Exception as e:
-        print(f"[panel-thread] fallback due to: {type(e).__name__}: {e}", flush=True)
-
-    # optional: try to create a thread under a parent channel if configured
-    try:
-        if PANEL_PARENT_CHANNEL_ID:
-            parent = bot.get_channel(PANEL_PARENT_CHANNEL_ID) or await bot.fetch_channel(PANEL_PARENT_CHANNEL_ID)
-            if isinstance(parent, discord.TextChannel):
-                th = await parent.create_thread(
-                    name="Recruitment Panels",
-                    auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080),
-                    reason="C1C-Matchmaker recruiter panel"
-                )
-                return th
-    except Exception as e:
-        print(f"[panel-thread] create_thread failed: {type(e).__name__}: {e}", flush=True)
-
-    return fallback
+        print(f"[panel-thread] FIXED mode fetch failed: {type(e).__name__}: {e}", flush=True)
+        return None
 
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
@@ -1178,6 +1167,14 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
 
     target_chan = await _resolve_recruiter_panel_channel(ctx)
 
+    if target_chan is None:
+        await ctx.reply("❌ I couldn’t access the configured recruiter thread. "
+                        "Check `PANEL_FIXED_THREAD_ID` and my permissions.", mention_author=False)
+        await _safe_delete(ctx.message)
+        return
+
+    print(f\"[clanmatch] sending to {getattr(target_chan, 'id', None)} (invoked {ctx.channel.id})\", flush=True)
+
     key = (ctx.author.id, "classic")
     old_id = ACTIVE_PANELS.get(key)
     if old_id:
@@ -1194,7 +1191,6 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     view.message = sent
     ACTIVE_PANELS[key] = sent.id
     await _safe_delete(ctx.message)
-    # no explicit `return` needed
 
 
 @commands.cooldown(1, 2, commands.BucketType.user)
@@ -1540,6 +1536,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
