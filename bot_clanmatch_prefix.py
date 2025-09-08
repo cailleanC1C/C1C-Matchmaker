@@ -68,7 +68,7 @@ PANEL_FIXED_THREAD_ID   = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0") or "0
 PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0") or "0")
 PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "10080") or "10080")  # minutes
 
-
+SEARCH_RESULTS_SOFT_CAP = int(os.environ.get("SEARCH_RESULTS_SOFT_CAP", "25"))
 
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
@@ -1090,6 +1090,13 @@ class ClanMatchView(discord.ui.View):
 
             # --- MEMBER "SEARCH" VARIANT: slim lite card + flip buttons ---
             if self.embed_variant == "search":
+                shown = matches[:SEARCH_RESULTS_SOFT_CAP]
+                if len(matches) > SEARCH_RESULTS_SOFT_CAP:
+                    await itx.followup.send(
+                        f"Showing first {SEARCH_RESULTS_SOFT_CAP} of {len(matches)} results. "
+                        "Refine filters to narrow further.",
+                           ephemeral=True
+                    )
                 for r in matches:
                     lite = make_embed_for_row_lite(r, filters_text, itx.guild)
                     view = SearchResultFlipView(
@@ -1689,3 +1696,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
