@@ -324,11 +324,11 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     return e
 
 def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
+    """Member-facing Entry Criteria card: Level + Spots only (no Inactives/Reserved)."""
     b = (row[COL_B_CLAN] or "").strip()
     c = (row[COL_C_TAG]  or "").strip()
     d = (row[COL_D_LEVEL] or "").strip()
     e_spots = (row[COL_E_SPOTS] or "").strip()
-    inactives = (row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "").strip()
 
     v  = (row[IDX_V]  or "").strip()
     w  = (row[IDX_W]  or "").strip()
@@ -338,10 +338,9 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     aa = (row[IDX_AA] or "").strip()
     ab = (row[IDX_AB] or "").strip()
 
+    # Title: no Inactives/Reserved in member view
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
-    if inactives:
-        title += f" | **Inactives:** {inactives}"
-        
+
     lines = ["**Entry Criteria:**"]
     if z:
         lines.append(f"Clan Boss: {z}")
@@ -373,8 +372,10 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
         if em:
             e.set_thumbnail(url=str(em.url))
 
-    e.set_footer(text=f"Filters used: {filters_text}")
+    if filters_text:
+        e.set_footer(text=f"Filters used: {filters_text}")
     return e
+
 
 # ---- NEW: member 'lite' card + profile-with-filters footer ----
 def make_embed_for_row_lite(row, _filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
@@ -570,6 +571,27 @@ def _page_embeds(rows, page_index, builder, filters_text, guild):
         last.set_footer(text=f"{ft} • {page_info}" if ft else page_info)
     return embeds
 
+def _page_embeds_search(rows, page_index, mode: str, filters_text: str, guild):
+    """Build up to PAGE_SIZE embeds for member search; mode in {'lite','entry','profile'}."""
+    def _build(row):
+        if mode == "entry":
+            return make_embed_for_row_search(row, filters_text, guild)
+        if mode == "profile":
+            return make_embed_for_profile_member(row, filters_text, guild)
+        return make_embed_for_row_lite(row, filters_text, guild)
+
+    start = page_index * PAGE_SIZE
+    end = min(len(rows), start + PAGE_SIZE)
+    slice_ = rows[start:end]
+    embeds = [_build(r) for r in slice_]
+    if embeds:
+        total_pages = max(1, math.ceil(len(rows) / PAGE_SIZE))
+        page_info = f"Page {page_index + 1}/{total_pages} • {len(rows)} total"
+        last = embeds[-1]
+        ft = last.footer.text or ""
+        last.set_footer(text=f"{ft} • {page_info}" if ft else page_info)
+    return embeds
+
 class PagedResultsView(discord.ui.View):
     """Prev/Next/Close pager; owner-locked."""
     def __init__(self, *, author_id: int, rows, builder, filters_text: str, guild: discord.Guild | None, timeout: float = 300):
@@ -663,7 +685,115 @@ class PagedResultsView(discord.ui.View):
                 await self.message.edit(embeds=embeds, view=self)
         except Exception:
             pass
-            
+
+class MemberSearchPagedView(discord.ui.View):
+    """
+    Member search: paginated single message, with a global view-mode toggle
+    that flips the whole page between Lite / Entry / Profile.
+    """
+    def __init__(self, *, author_id: int, rows, filters_text: str, guild: discord.Guild | None, timeout: float = 900):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.rows = rows
+        self.filters_text = filters_text
+        self.guild = guild
+        self.page = 0
+        self.mode = "lite"  # 'lite' | 'entry' | 'profile'
+        self.message: discord.Message | None = None
+        self._sync_buttons()
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user and itx.user.id == self.author_id:
+            return True
+        try:
+            await itx.response.send_message("⚠️ Not your panel. Type **!clansearch** to open your own.", ephemeral=True)
+        except InteractionResponded:
+            try: await itx.followup.send("⚠️ Not your panel. Type **!clansearch** to open your own.", ephemeral=True)
+            except Exception: pass
+        return False
+
+    def _sync_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "ms_lite":
+                    child.style = discord.ButtonStyle.primary if self.mode == "lite" else discord.ButtonStyle.secondary
+                elif child.custom_id == "ms_entry":
+                    child.style = discord.ButtonStyle.primary if self.mode == "entry" else discord.ButtonStyle.secondary
+                elif child.custom_id == "ms_profile":
+                    child.style = discord.ButtonStyle.primary if self.mode == "profile" else discord.ButtonStyle.secondary
+                elif child.custom_id == "ms_prev":
+                    child.disabled = (self.page <= 0)
+                elif child.custom_id == "ms_next":
+                    max_page = max(0, math.ceil(len(self.rows) / PAGE_SIZE) - 1)
+                    child.disabled = (self.page >= max_page)
+
+    async def _edit(self, itx: discord.Interaction):
+        self._sync_buttons()
+        embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+        try:
+            await itx.response.edit_message(embeds=embeds, view=self)
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+    # --- View mode buttons (row 0) ---
+    @discord.ui.button(emoji="📰", label="Lite", style=discord.ButtonStyle.primary, row=0, custom_id="ms_lite")
+    async def ms_lite(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        self.mode = "lite"
+        await self._edit(itx)
+
+    @discord.ui.button(emoji="✅", label="Entry", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_entry")
+    async def ms_entry(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        self.mode = "entry"
+        await self._edit(itx)
+
+    @discord.ui.button(emoji="👤", label="Profile", style=discord.ButtonStyle.secondary, row=0, custom_id="ms_profile")
+    async def ms_profile(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        self.mode = "profile"
+        await self._edit(itx)
+
+    # --- Pager buttons (row 1) ---
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1, custom_id="ms_prev")
+    async def prev(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+        await self._edit(itx)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary, row=1, custom_id="ms_next")
+    async def next(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        max_page = max(0, math.ceil(len(self.rows) / PAGE_SIZE) - 1)
+        if self.page < max_page:
+            self.page += 1
+        await self._edit(itx)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=1, custom_id="ms_close")
+    async def close(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        try:
+            await itx.message.delete()
+        except Exception:
+            for child in self.children:
+                child.disabled = True
+            embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+            if embeds:
+                last = embeds[-1]; ft = last.footer.text or ""
+                last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+            try:
+                await itx.response.edit_message(embeds=embeds, view=self)
+            except InteractionResponded:
+                await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+    async def on_timeout(self):
+        try:
+            for child in self.children:
+                child.disabled = True
+            if self.message:
+                embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+                if embeds:
+                    last = embeds[-1]; ft = last.footer.text or ""
+                    last.set_footer(text=f"{ft} • Expired" if ft else "Expired")
+                await self.message.edit(embeds=embeds, view=self)
+        except Exception:
+            pass
+
 class SearchResultFlipView(discord.ui.View):
     """
     Member-facing buttons that flip a single search result between:
@@ -1088,27 +1218,20 @@ class ClanMatchView(discord.ui.View):
                 self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
             )
 
-            # --- MEMBER "SEARCH" VARIANT: slim lite card + flip buttons ---
+            # --- MEMBER "SEARCH" VARIANT: paged single message + global view toggle ---
             if self.embed_variant == "search":
-                shown = matches[:SEARCH_RESULTS_SOFT_CAP]
-                if len(matches) > SEARCH_RESULTS_SOFT_CAP:
-                    await itx.followup.send(
-                        f"Showing first {SEARCH_RESULTS_SOFT_CAP} of {len(matches)} results. "
-                        "Refine filters to narrow further.",
-                           ephemeral=True
-                    )
-                for r in matches:
-                    lite = make_embed_for_row_lite(r, filters_text, itx.guild)
-                    view = SearchResultFlipView(
-                        author_id=itx.user.id,
-                        row=r,
-                        filters_text=filters_text,
-                        guild=itx.guild,
-                        timeout=900
-                    )
-                    msg = await itx.followup.send(embed=lite, view=view)
-                    view.message = msg
-                    responded = True
+                view = MemberSearchPagedView(
+                    author_id=itx.user.id,
+                    rows=matches,
+                    filters_text=filters_text,
+                    guild=itx.guild,
+                    timeout=900
+                )
+                embeds = _page_embeds_search(matches, 0, "lite", filters_text, itx.guild)
+                sent = await itx.followup.send(embeds=embeds, view=view)
+                view.message = sent
+                self.results_message = sent  # optional: keeps a handle if you want future refresh
+                responded = True
                 return
 
             # --- RECRUITER "CLASSIC" VARIANT: same as before (paged embeds) ---
@@ -1696,4 +1819,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
