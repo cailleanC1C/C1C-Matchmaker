@@ -1173,7 +1173,10 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         await _safe_delete(ctx.message)
         return
 
-    print(f\"[clanmatch] sending to {getattr(target_chan, 'id', None)} (invoked {ctx.channel.id})\", flush=True)
+    print(f"[clanmatch] sending to {getattr(target_chan, 'id', None)} (invoked {ctx.channel.id})", flush=True)
+    # or
+    print(f'[clanmatch] sending to {getattr(target_chan, "id", None)} (invoked {ctx.channel.id})', flush=True)
+
 
     key = (ctx.author.id, "classic")
     old_id = ACTIVE_PANELS.get(key)
@@ -1536,6 +1539,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
