@@ -1101,7 +1101,7 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
 
 # ------------------- Reaction flip: 💡 -------------------
-@bot.event@bot.event
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
         # ignore DMs / self / non-bulb
@@ -1284,6 +1284,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
