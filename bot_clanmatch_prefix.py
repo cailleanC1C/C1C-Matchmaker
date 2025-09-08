@@ -437,7 +437,7 @@ def build_recruiters_summary_embed(guild: discord.Guild | None) -> discord.Embed
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = []
-    lines.append("**Summary open spots:**")
+    lines.append("**General overview**")
     for key_norm, pretty in [
         ("overall", "overall"),
         ("top10",   "Top10"),
@@ -459,7 +459,7 @@ def build_recruiters_summary_embed(guild: discord.Guild | None) -> discord.Embed
         o, ina, res = data.get(key_norm, (0,0,0))
         lines.append(f"{pretty}:   open {o} | inactives {ina} | reserved {res}")
 
-    e = discord.Embed(title=f"Update {today}", description="\n".join(lines))
+    e = discord.Embed(title=f"Summary open spots", description="\n".join(lines))
 
     # thumbnail with the C1C emoji (same padding proxy as other embeds)
     thumb = padded_emoji_url(guild, "C1C")
@@ -1282,7 +1282,7 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
-@bot.command(name="clanprofile", aliases=["clan", "cp"])
+@bot.command(name="clan")
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
     if not query:
         await ctx.reply("Usage: `!clan <tag or name>` — e.g., `!clan C1CE` or `!clan Elders`", mention_author=False)
@@ -1496,6 +1496,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
