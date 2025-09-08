@@ -585,14 +585,69 @@ class PagedResultsView(discord.ui.View):
     async def close_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
         # Try to delete the results message entirely.
         try:
-            # Prefer the interaction message; fall back to stored references.
+            # Prefer the interaction message; fall back to stored refs.
             target = getattr(itx, "message", None) or self.message or self.results_message
             if target:
                 await target.delete()
                 return
         except Exception:
-            # If deletion fails (e.g., missing permissions), fall back to disabling the view.
+            # If deletion fails (e.g., perms), fall back to disabling the view.
             pass
+
+        # Fallback: disable buttons and mark as closed (no delete)
+        for child in self.children:
+            child.disabled = True
+        embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+        if embeds:
+            last = embeds[-1]
+            ft = last.footer.text or ""
+            last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+        try:
+            await itx.response.edit_message(embeds=embeds, view=self)
+        except InteractionResponded:
+            await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+        
+    # Fallback: disable buttons and mark as closed (no delete)
+    for child in self.children:
+        child.disabled = True
+    embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+    if embeds:
+        last = embeds[-1]
+        ft = last.footer.text or ""
+        last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+    try:
+        await itx.response.edit_message(embeds=embeds, view=self)
+    except InteractionResponded:
+        await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+
+    # Fallback: disable buttons and mark as closed (no delete)
+    for child in self.children:
+        child.disabled = True
+    embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+    if embeds:
+        last = embeds[-1]
+        ft = last.footer.text or ""
+        last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+    try:
+        await itx.response.edit_message(embeds=embeds, view=self)
+    except InteractionResponded:
+        await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
+
+    # Fallback: disable buttons and mark as closed (no delete)
+    for child in self.children:
+        child.disabled = True
+    embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
+    if embeds:
+        last = embeds[-1]
+        ft = last.footer.text or ""
+        last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
+    try:
+        await itx.response.edit_message(embeds=embeds, view=self)
+    except InteractionResponded:
+        await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+
 
     # Fallback: disable buttons and mark as closed (no delete)
     for child in self.children:
@@ -1202,15 +1257,10 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
                     await ctx.reply(
                         f"{ctx.author.mention} your recruiter panel is in {target_chan.mention}.",
                         mention_author=False,
-                        allowed_mentions=allowed,
-                )
-            except Exception:
-                pass
-
-            await _safe_delete(ctx.message)
-            return
-        except Exception:
-            pass
+                        allowed_mentions=allowed
+                    )
+                except Exception:
+                    pass
 
     # New panel: ping the opener in the thread and drop a pointer in the invoking channel
     sent = await target_chan.send(
@@ -1229,7 +1279,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
                 f"Jump to it: {sent.jump_url}",
                 mention_author=False,
                 allowed_mentions=allowed,
-                delete_after=20,  # remove/tune if you prefer
+                delete_after=60,  # remove/tune if you prefer
             )
         except Exception:
             pass
@@ -1580,6 +1630,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
