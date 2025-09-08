@@ -62,6 +62,13 @@ RECRUITERS_THREAD_ID = int(os.environ.get("RECRUITERS_THREAD_ID", "0") or "0")
 ROLE_ID_RECRUITMENT_COORDINATOR = int(os.environ.get("ROLE_ID_RECRUITMENT_COORDINATOR", "0") or "0")
 ROLE_ID_RECRUITMENT_SCOUT       = int(os.environ.get("ROLE_ID_RECRUITMENT_SCOUT", "0") or "0")
 
+# ---- Recruiter panel threading ----
+PANEL_THREAD_MODE       = (os.environ.get("PANEL_THREAD_MODE", "same") or "same").lower()  # "fixed" or "same"
+PANEL_FIXED_THREAD_ID   = int(os.environ.get("PANEL_FIXED_THREAD_ID", "0") or "0")
+PANEL_PARENT_CHANNEL_ID = int(os.environ.get("PANEL_PARENT_CHANNEL_ID", "0") or "0")
+PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "10080") or "10080")  # minutes
+
+
 
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
@@ -1092,6 +1099,52 @@ async def _safe_delete(message: discord.Message):
     except Exception:
         pass
 
+async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc.Messageable:
+    """
+    Returns the channel/thread where !clanmatch panels should live.
+    If PANEL_THREAD_MODE=fixed and PANEL_FIXED_THREAD_ID is valid, use that thread.
+    Falls back to the invoking channel on any error.
+    """
+    # default: same place where command was used
+    fallback = ctx.channel
+
+    if PANEL_THREAD_MODE != "fixed" or not PANEL_FIXED_THREAD_ID:
+        return fallback
+
+    try:
+        dest = bot.get_channel(PANEL_FIXED_THREAD_ID) or await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
+        # Make sure it's a thread and keep it alive
+        if isinstance(dest, discord.Thread):
+            if dest.archived:
+                try:
+                    await dest.edit(archived=False, auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080))
+                except Exception:
+                    # best-effort; continue even if we can’t edit
+                    pass
+            return dest
+        # If someone accidentally supplied a text channel ID, just use that channel
+        if isinstance(dest, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.ForumChannel)):
+            return dest
+    except Exception as e:
+        print(f"[panel-thread] fallback due to: {type(e).__name__}: {e}", flush=True)
+
+    # optional: try to create a thread under a parent channel if configured
+    try:
+        if PANEL_PARENT_CHANNEL_ID:
+            parent = bot.get_channel(PANEL_PARENT_CHANNEL_ID) or await bot.fetch_channel(PANEL_PARENT_CHANNEL_ID)
+            if isinstance(parent, discord.TextChannel):
+                th = await parent.create_thread(
+                    name="Recruitment Panels",
+                    auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080),
+                    reason="C1C-Matchmaker recruiter panel"
+                )
+                return th
+    except Exception as e:
+        print(f"[panel-thread] create_thread failed: {type(e).__name__}: {e}", flush=True)
+
+    return fallback
+
+
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clanmatch")
 async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
@@ -1179,12 +1232,16 @@ async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
                     "to see Entry Criteria and open Spots."
     )
     embed.set_footer(text="Only the summoner can use this panel.")
+    
+# resolve fixed thread (or fallback to current channel)
+target_chan = await _resolve_recruiter_panel_channel(ctx)
+
 
     key = (ctx.author.id, "search")
     old_id = ACTIVE_PANELS.get(key)
     if old_id:
         try:
-            msg = await ctx.channel.fetch_message(old_id)
+            sent = await target_chan.send(embed=embed, view=view)
             view.message = msg
             await msg.edit(embed=embed, view=view)
             await _safe_delete(ctx.message)
@@ -1496,6 +1553,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
