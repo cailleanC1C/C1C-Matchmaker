@@ -495,47 +495,10 @@ def read_recruiter_summary():
         out[key_norm] = _get_line_values(rows, start, key_norm, open_idx, inact_idx, reserve_idx)
     return out
 
-    lines = []
-    lines.append("**General overview**")
-    for key_norm, pretty in [
-        ("overall", "overall"),
-        ("top10",   "Top10"),
-        ("top5",    "Top 5"),
-    ]:
-        o, ina, res = data.get(key_norm, (0,0,0))
-        lines.append(f"{pretty}:   open {o} | inactives {ina} | reserved {res}")
+# ------------------- Daily poster -------------------
 
-    lines.append("")
-    lines.append("**per Bracket:**")
-    for key_norm, pretty in [
-        ("elite end game", "Elite End Game"),
-        ("early end game", "Early End Game"),
-        ("late game",      "Late Game"),
-        ("mid game",       "Mid Game"),
-        ("early game",     "Early Game"),
-        ("beginners",      "Beginners"),
-    ]:
-        o, ina, res = data.get(key_norm, (0,0,0))
-        lines.append(f"{pretty}:   open {o} | inactives {ina} | reserved {res}")
+POST_TIME_UTC = dtime(hour=17, minute=30, tzinfo=timezone.utc)  # adjust if you want a different UTC time
 
-    e = discord.Embed(title=f"Summary open spots", description="\n".join(lines))
-
-    # thumbnail with the C1C emoji (same padding proxy as other embeds)
-    thumb = padded_emoji_url(guild, "C1C")
-    if thumb:
-        e.set_thumbnail(url=thumb)
-    elif not STRICT_EMOJI_PROXY:
-        em = emoji_for_tag(guild, "C1C")
-        if em:
-            e.set_thumbnail(url=str(em.url))
-
-    return e
-
-# ------------------- Daily poster (14:00 UTC) -------------------
-
-POST_TIME_UTC = dtime(hour=17, minute=0, tzinfo=timezone.utc)
-
-@tasks.loop(time=POST_TIME_UTC)
 def build_recruiters_summary_embed(guild: discord.Guild | None = None) -> discord.Embed:
     data = read_recruiter_summary()
 
@@ -564,7 +527,6 @@ def build_recruiters_summary_embed(guild: discord.Guild | None = None) -> discor
 
     e = discord.Embed(title="Summary open spots", description="\n".join(lines))
 
-    # thumbnail with the C1C emoji
     thumb = padded_emoji_url(guild, "C1C")
     if thumb:
         e.set_thumbnail(url=thumb)
@@ -572,16 +534,15 @@ def build_recruiters_summary_embed(guild: discord.Guild | None = None) -> discor
         em = emoji_for_tag(guild, "C1C")
         if em:
             e.set_thumbnail(url=str(em.url))
-
     return e
 
+@tasks.loop(time=POST_TIME_UTC)
 async def daily_recruiters_update():
     try:
         if not RECRUITERS_THREAD_ID:
             print("[daily] RECRUITERS_THREAD_ID not set; skipping.")
             return
 
-        # fetch thread (works for threads and channels)
         thread = bot.get_channel(RECRUITERS_THREAD_ID) or await bot.fetch_channel(RECRUITERS_THREAD_ID)
         if thread is None:
             print(f"[daily] Could not fetch thread {RECRUITERS_THREAD_ID}")
@@ -589,7 +550,6 @@ async def daily_recruiters_update():
 
         embed = build_recruiters_summary_embed(getattr(thread, "guild", None))
 
-        # build the mentions as message content (lines exactly as requested)
         parts = [f"Update {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"]
         if ROLE_ID_RECRUITMENT_COORDINATOR:
             parts.append(f"<@&{ROLE_ID_RECRUITMENT_COORDINATOR}>")
@@ -598,10 +558,8 @@ async def daily_recruiters_update():
         content = "\n".join(parts)
 
         await thread.send(content=content, embed=embed)
-
     except Exception as e:
         print(f"[daily] post failed: {type(e).__name__}: {e}")
-
 
 # ----------- Multi-card paging helpers (for !clanmatch only) -----------
 def _page_embeds(rows, page_index, builder, filters_text, guild):
@@ -2072,6 +2030,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
