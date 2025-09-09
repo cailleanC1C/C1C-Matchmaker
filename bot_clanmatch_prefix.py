@@ -1245,13 +1245,6 @@ class ClanMatchView(discord.ui.View):
                 matches = matches[:cap]
                 cap_note = f"first {cap} of {total_found}"
 
-            # Footer text describing filters (plus cap note if any)
-            filters_text = format_filters_footer(
-                self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
-            )
-            if cap_note:
-                filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
-
             # ----- MEMBER "SEARCH" VARIANT -----
             if self.embed_variant == "search":
                 view = MemberSearchPagedView(
@@ -1918,6 +1911,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
