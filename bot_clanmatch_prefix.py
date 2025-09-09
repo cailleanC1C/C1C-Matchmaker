@@ -1384,7 +1384,10 @@ async def help_cmd(ctx: commands.Context):
     e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
     await ctx.reply(embed=e, mention_author=False)
 
-
+@bot.command(name="forcesummary")
+async def force_summary(ctx):
+    embed = build_recruiters_summary_embed(ctx.guild)
+    await ctx.send(embed=embed)
 
 # ------------------- Commands: panels -------------------
 async def _safe_delete(message: discord.Message):
@@ -2030,6 +2033,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
