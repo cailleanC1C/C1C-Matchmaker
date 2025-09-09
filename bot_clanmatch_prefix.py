@@ -533,9 +533,48 @@ def read_recruiter_summary():
 
 # ------------------- Daily poster (14:00 UTC) -------------------
 
-POST_TIME_UTC = dtime(hour=14, minute=0, tzinfo=timezone.utc)
+POST_TIME_UTC = dtime(hour=17, minute=0, tzinfo=timezone.utc)
 
 @tasks.loop(time=POST_TIME_UTC)
+def build_recruiters_summary_embed(guild: discord.Guild | None = None) -> discord.Embed:
+    data = read_recruiter_summary()
+
+    lines = []
+    lines.append("**General overview**")
+    for key_norm, pretty in [
+        ("overall", "overall"),
+        ("top10",   "Top10"),
+        ("top5",    "Top 5"),
+    ]:
+        o, ina, res = data.get(key_norm, (0, 0, 0))
+        lines.append(f"{pretty}: open {o} | inactives {ina} | reserved {res}")
+
+    lines.append("")
+    lines.append("**per Bracket**")
+    for key_norm, pretty in [
+        ("elite end game", "Elite End Game"),
+        ("early end game", "Early End Game"),
+        ("late game",      "Late Game"),
+        ("mid game",       "Mid Game"),
+        ("early game",     "Early Game"),
+        ("beginners",      "Beginners"),
+    ]:
+        o, ina, res = data.get(key_norm, (0, 0, 0))
+        lines.append(f"{pretty}: open {o} | inactives {ina} | reserved {res}")
+
+    e = discord.Embed(title="Summary open spots", description="\n".join(lines))
+
+    # thumbnail with the C1C emoji
+    thumb = padded_emoji_url(guild, "C1C")
+    if thumb:
+        e.set_thumbnail(url=thumb)
+    elif not STRICT_EMOJI_PROXY:
+        em = emoji_for_tag(guild, "C1C")
+        if em:
+            e.set_thumbnail(url=str(em.url))
+
+    return e
+
 async def daily_recruiters_update():
     try:
         if not RECRUITERS_THREAD_ID:
@@ -2033,6 +2072,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
