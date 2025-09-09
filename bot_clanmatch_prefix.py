@@ -1834,12 +1834,15 @@ async def on_ready():
     except Exception as e:
         print(f"[slash] sync failed: {e}", flush=True)
 
-    # NEW: kick off the daily poster (safe to call repeatedly)
+    # kick off the daily poster (safe to call repeatedly)
     if not daily_recruiters_update.is_running():
         daily_recruiters_update.start()
     # Start scheduled cleanup
     if not scheduled_cleanup.is_running():
         scheduled_cleanup.start()
+    # Start the watchdog loop (exits the process if Discord stays disconnected)
+    if not watchdog.is_running():
+        watchdog.start()
 
 @bot.event
 async def on_disconnect():
@@ -1964,4 +1967,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
