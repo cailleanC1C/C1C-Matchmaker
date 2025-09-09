@@ -11,8 +11,8 @@ from discord.utils import get
 
 import gspread
 from google.oauth2.service_account import Credentials
-
-from aiohttp import web, ClientSession
+from urllib.parse import urlparse
+from aiohttp import web, ClientSession, ClientTimeout
 from PIL import Image  # Pillow
 
 # Pillow 10+ changed resampling enums; keep compatibility with <10
@@ -44,6 +44,15 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 # Public base URL for proxying padded emoji images
 BASE_URL = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
+# Allowed hosts for emoji source URLs (SSRF protection)
+ALLOWED_EMOJI_HOSTS = {
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+}
+
+# Max bytes we'll download for an emoji file (2 MB default)
+EMOJI_MAX_BYTES = int(os.environ.get("EMOJI_MAX_BYTES", "2000000"))
 
 # Padded-emoji tunables
 EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
@@ -485,10 +494,6 @@ def read_recruiter_summary():
     for key_norm, _pretty in labels:
         out[key_norm] = _get_line_values(rows, start, key_norm, open_idx, inact_idx, reserve_idx)
     return out
-
-def build_recruiters_summary_embed(guild: discord.Guild | None) -> discord.Embed:
-    data = read_recruiter_summary()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = []
     lines.append("**General overview**")
@@ -1713,6 +1718,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except Exception as e:
         print("[react] error:", e)
 
+@bot.event
+async def on_message_delete(message: discord.Message):
+    REACT_INDEX.pop(message.id, None)
+
+
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
 async def ping(ctx):
@@ -1873,8 +1883,10 @@ async def emoji_pad_handler(request: web.Request):
     """
     /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>&v=<cache-buster>
     Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
+    Now with SSRF + size/time guards.
     """
     src = request.query.get("u")
+
     # Clamp inputs to prevent abuse / CPU spikes
     s_raw = request.query.get("s")
     try:
@@ -1882,22 +1894,69 @@ async def emoji_pad_handler(request: web.Request):
     except Exception:
         size = EMOJI_PAD_SIZE
     size = max(64, min(512, size))  # 64–512px canvas
-    
+
     b_raw = request.query.get("box")
     try:
         box = float(b_raw) if b_raw is not None else EMOJI_PAD_BOX
     except Exception:
         box = EMOJI_PAD_BOX
     box = max(0.2, min(0.95, box))  # 20%–95% glyph fill
+
     if not src:
         return web.Response(status=400, text="missing u")
+
+    # ---- URL validation (SSRF protection)
     try:
-        async with request.app["session"].get(src) as resp:
+        parsed = urlparse(src)
+    except Exception:
+        return web.Response(status=400, text="invalid url")
+
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host not in ALLOWED_EMOJI_HOSTS:
+        return web.Response(status=400, text="invalid source host")
+
+    try:
+        # Tight network timeout; no redirects (avoid hop to untrusted hosts)
+        timeout = ClientTimeout(total=8)
+        async with request.app["session"].get(
+            src,
+            timeout=timeout,
+            allow_redirects=False,
+            headers={"User-Agent": "c1c-matchmaker/emoji-pad"}
+        ) as resp:
             if resp.status != 200:
                 return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
-            raw = await resp.read()
 
-        img = Image.open(io.BytesIO(raw)).convert("RGBA")
+            # Content-Type must be an image
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if not ctype.startswith("image/"):
+                return web.Response(status=415, text="unsupported media type")
+
+            # Enforce byte cap before reading
+            if resp.content_length is not None and resp.content_length > EMOJI_MAX_BYTES:
+                return web.Response(status=413, text="image too large")
+
+            # Stream-read with cap
+            buf = bytearray()
+            async for chunk in resp.content.iter_chunked(65536):
+                buf.extend(chunk)
+                if len(buf) > EMOJI_MAX_BYTES:
+                    return web.Response(status=413, text="image too large")
+            raw = bytes(buf)
+
+        # ---- Image processing
+        try:
+            img = Image.open(io.BytesIO(raw))
+        except Exception as e:
+            return web.Response(status=415, text=f"cannot parse image: {type(e).__name__}")
+
+        # Convert to RGBA (handles PNG/WEBP/GIF first frame, etc.)
+        try:
+            img = img.convert("RGBA")
+        except Exception:
+            # Some formats need load() before convert
+            img.load()
+            img = img.convert("RGBA")
 
         # Trim transparent borders so glyph is truly centered
         alpha = img.split()[-1]
@@ -1907,7 +1966,7 @@ async def emoji_pad_handler(request: web.Request):
 
         # Scale glyph to fit target “box” inside the square canvas
         w, h = img.size
-        max_side = max(w, h)
+        max_side = max(w, h) or 1
         target   = max(1, int(size * box))
         scale    = target / float(max_side)
         new_w    = max(1, int(w * scale))
@@ -1926,6 +1985,10 @@ async def emoji_pad_handler(request: web.Request):
             headers={"Cache-Control": "public, max-age=86400"},
             content_type="image/png",
         )
+
+    # Network / PIL fallbacks
+    except asyncio.TimeoutError:
+        return web.Response(status=504, text="image fetch timeout")
     except Exception as e:
         return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
@@ -1967,5 +2030,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
