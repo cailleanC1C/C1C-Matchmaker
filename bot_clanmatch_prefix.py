@@ -1248,6 +1248,14 @@ class ClanMatchView(discord.ui.View):
                 matches = matches[:cap]
                 cap_note = f"first {cap} of {total_found}"
 
+            # Build footer text (and include cap note if we truncated)
+            filters_text = format_filters_footer(
+            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+            )
+            if cap_note:
+                filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
+
+
             # ----- MEMBER "SEARCH" VARIANT -----
             if self.embed_variant == "search":
                 view = MemberSearchPagedView(
@@ -1838,8 +1846,6 @@ async def on_disconnect():
     global BOT_CONNECTED
     BOT_CONNECTED = False
 
-from discord.ext import tasks
-
 WATCHDOG_CHECK_SEC = int(os.environ.get("WATCHDOG_CHECK_SEC", "60"))
 WATCHDOG_MAX_DISCONNECT_SEC = int(os.environ.get("WATCHDOG_MAX_DISCONNECT_SEC", "600"))  # 10 min
 
@@ -1855,12 +1861,6 @@ async def watchdog():
         finally:
             import sys
             sys.exit(1)
-
-@bot.event
-async def on_ready():
-    # ...your existing on_ready body...
-    if not watchdog.is_running():
-        watchdog.start()
 
 
 # ------------------- Tiny web server + image-pad proxy -------------------
@@ -1964,3 +1964,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
