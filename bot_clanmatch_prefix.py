@@ -32,6 +32,9 @@ def _fmt_uptime():
     h, r = divmod(secs, 3600)
     m, s = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+    
+BOT_CONNECTED = False
+_LAST_READY_TS = 0.0
 
 # ------------------- ENV -------------------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
@@ -1813,6 +1816,9 @@ async def scheduled_cleanup():
 # ------------------- Events -------------------
 @bot.event
 async def on_ready():
+    global BOT_CONNECTED, _LAST_READY_TS
+    BOT_CONNECTED = True
+    _LAST_READY_TS = time.time()    
     print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
     try:
         synced = await bot.tree.sync()
@@ -1827,6 +1833,36 @@ async def on_ready():
     if not scheduled_cleanup.is_running():
         scheduled_cleanup.start()
 
+@bot.event
+async def on_disconnect():
+    global BOT_CONNECTED
+    BOT_CONNECTED = False
+
+from discord.ext import tasks
+
+WATCHDOG_CHECK_SEC = int(os.environ.get("WATCHDOG_CHECK_SEC", "60"))
+WATCHDOG_MAX_DISCONNECT_SEC = int(os.environ.get("WATCHDOG_MAX_DISCONNECT_SEC", "600"))  # 10 min
+
+@tasks.loop(seconds=WATCHDOG_CHECK_SEC)
+async def watchdog():
+    if BOT_CONNECTED:
+        return
+    # if we've been disconnected too long, exit so the platform restarts us
+    if _LAST_READY_TS and (time.time() - _LAST_READY_TS) > WATCHDOG_MAX_DISCONNECT_SEC:
+        print("[watchdog] Disconnected too long; exiting for clean restart.", flush=True)
+        try:
+            await bot.close()
+        finally:
+            import sys
+            sys.exit(1)
+
+@bot.event
+async def on_ready():
+    # ...your existing on_ready body...
+    if not watchdog.is_running():
+        watchdog.start()
+
+
 # ------------------- Tiny web server + image-pad proxy -------------------
 async def _health_http(_req): return web.Response(text="ok")
 
@@ -1836,8 +1872,20 @@ async def emoji_pad_handler(request: web.Request):
     Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
     """
     src = request.query.get("u")
-    size = int(request.query.get("s", str(EMOJI_PAD_SIZE)))
-    box  = float(request.query.get("box", str(EMOJI_PAD_BOX)))
+    # Clamp inputs to prevent abuse / CPU spikes
+    s_raw = request.query.get("s")
+    try:
+        size = int(s_raw) if s_raw is not None else EMOJI_PAD_SIZE
+    except Exception:
+        size = EMOJI_PAD_SIZE
+    size = max(64, min(512, size))  # 64–512px canvas
+    
+    b_raw = request.query.get("box")
+    try:
+        box = float(b_raw) if b_raw is not None else EMOJI_PAD_BOX
+    except Exception:
+        box = EMOJI_PAD_BOX
+    box = max(0.2, min(0.95, box))  # 20%–95% glyph fill
     if not src:
         return web.Response(status=400, text="missing u")
     try:
@@ -1878,12 +1926,17 @@ async def emoji_pad_handler(request: web.Request):
     except Exception as e:
         return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
+async def ready_http(_req):
+    status = 200 if BOT_CONNECTED else 503
+    return web.json_response({"ok": BOT_CONNECTED, "uptime": _fmt_uptime()}, status=status)
+
 async def start_webserver():
     app = web.Application()
     app["session"] = ClientSession()
     async def _close_session(app):
         await app["session"].close()
     app.on_cleanup.append(_close_session)
+    app.router.add_get("/ready", ready_http)
     app.router.add_get("/", _health_http)
     app.router.add_get("/health", _health_http)
     app.router.add_get("/emoji-pad", emoji_pad_handler)
@@ -1911,10 +1964,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
