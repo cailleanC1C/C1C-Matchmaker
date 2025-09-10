@@ -23,6 +23,7 @@ except AttributeError:
     
 from discord.ext import tasks
 from datetime import datetime, timezone, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
@@ -87,7 +88,8 @@ _gc = None
 _ws = None
 _cache_rows = None
 _cache_time = 0.0
-CACHE_TTL = 60  # seconds
+CACHE_TTL = int(os.environ.get("SHEETS_CACHE_TTL_SEC", "28800"))  # default 8h
+
 
 def get_ws(force: bool = False):
     """Connect to Google Sheets only when needed."""
@@ -496,6 +498,71 @@ def read_recruiter_summary():
     return out
 
 # ------------------- Daily poster -------------------
+
+# ------------------- Scheduled Sheets refresh (3x/day via env) -------------------
+_SHEETS_REFRESH_TASK: asyncio.Task | None = None
+
+def _parse_refresh_times(env_str: str) -> list[tuple[int, int]]:
+    times = []
+    for tok in (env_str or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            h, m = map(int, tok.split(":"))
+            h = max(0, min(23, h))
+            m = max(0, min(59, m))
+            times.append((h, m))
+        except Exception:
+            pass
+    # dedupe + sort; default if nothing valid
+    return sorted(set(times)) or [(2, 0), (10, 0), (18, 0)]
+
+async def _sleep_until(dt: datetime):
+    now = datetime.now(dt.tzinfo)
+    delay = (dt - now).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+async def sheets_refresh_scheduler():
+    tzname = os.environ.get("TIMEZONE", "Europe/Vienna")
+    try:
+        tz = ZoneInfo(tzname)
+    except Exception:
+        tz = ZoneInfo("UTC")
+        tzname = "UTC"
+
+    REFRESH_ENV = os.environ.get("REFRESH_TIMES", "02:00,10:00,18:00")
+    times = _parse_refresh_times(REFRESH_ENV)
+    print(f"[sheets-refresh] timezone={tzname} times={times}", flush=True)
+
+    while True:
+        now = datetime.now(tz)
+        # next scheduled time today (or roll to tomorrow)
+        future_today = [now.replace(hour=h, minute=m, second=0, microsecond=0) for h, m in times if
+                        now.replace(hour=h, minute=m, second=0, microsecond=0) > now]
+        if future_today:
+            next_dt = min(future_today)
+        else:
+            h, m = times[0]
+            next_dt = (now + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
+
+        await _sleep_until(next_dt)
+
+        # refresh: clear cache, warm it, optional log message
+        try:
+            clear_cache()
+            _ = get_rows(True)  # warm cache immediately
+            log_id = int(os.environ.get("LOG_CHANNEL_ID", "0") or "0")
+            if log_id:
+                ch = bot.get_channel(log_id) or await bot.fetch_channel(log_id)
+                if ch:
+                    when_local = next_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+                    await ch.send(f"🔄 Sheets auto-refreshed at {when_local} ({tzname})")
+            print("[sheets-refresh] refreshed cache", flush=True)
+        except Exception as e:
+            print(f"[sheets-refresh] failed: {type(e).__name__}: {e}", flush=True)
+
 
 POST_TIME_UTC = dtime(hour=17, minute=30, tzinfo=timezone.utc)  # adjust if you want a different UTC time
 
@@ -1513,6 +1580,12 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
 
     await _safe_delete(ctx.message)
 
+@bot.command()
+async def mmhealth(ctx):
+    import os, platform
+    await ctx.send(f"🟢 Matchmaker OK | host={os.getenv('RENDER_INSTANCE','?')} | py={platform.python_version()}")
+
+
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
@@ -1854,6 +1927,11 @@ async def on_ready():
     if not watchdog.is_running():
         watchdog.start()
 
+    # Start the Sheets refresh scheduler (3x/day via REFRESH_TIMES)
+    global _SHEETS_REFRESH_TASK
+    if _SHEETS_REFRESH_TASK is None or _SHEETS_REFRESH_TASK.done():
+        _SHEETS_REFRESH_TASK = bot.loop.create_task(sheets_refresh_scheduler())
+
 @bot.event
 async def on_disconnect():
     global BOT_CONNECTED
@@ -2030,6 +2108,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
