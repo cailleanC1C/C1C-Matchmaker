@@ -1395,64 +1395,89 @@ class ClanMatchView(discord.ui.View):
 
 
 # ------------------- Help (custom) -------------------
-
 @bot.command(name="help")
-async def help_cmd(ctx: commands.Context):
-    e = discord.Embed(
-        title="C1C-Matchmaker — Help",
-        description=(
-            "Helps recruiters place new players into the right clan, and lets members "
-            "browse open spots and entry criteria."
+async def help_cmd(ctx: commands.Context, *, topic: str = None):
+    topic = (topic or "").strip().lower()
+
+    pages = {
+        "clanmatch": (
+            "`!clanmatch`\n"
+            "Opens the recruiter panel for placing new players.\n"
+            "Pick filters (CB, Hydra, Chimera, CvC Yes/No, Siege Yes/No, Playstyle, Roster).\n"
+            "⚠️ Only the person who opens a panel can use it."
         ),
-        color=discord.Color.blurple()
-    )
-
-    # Thumbnail: C1C emoji (uses the same padded-emoji proxy as result embeds)
-    thumb = padded_emoji_url(ctx.guild, "C1C")
-    if thumb:
-        e.set_thumbnail(url=thumb)
-    elif not STRICT_EMOJI_PROXY:
-        em = emoji_for_tag(ctx.guild, "C1C")
-        if em:
-            e.set_thumbnail(url=str(em.url))
-
-    e.add_field(
-        name="For Recruiters",
-        value=(
-            "• `!clanmatch` — Open the recruiter panel. Pick filters (CB, Hydra, Chimera, "
-            "CvC Yes/No, Siege Yes/No, Playstyle, Roster). Only the person who opens a panel can use it.\n"
-            "• `!clan <tag or name>` — Show a clan **Profile** (level, rank, leadership, "
-            "boss/hydra/chimera ranges, CvC & Siege stats, progression/style)."
+        "clansearch": (
+            "`!clansearch`\n"
+            "Opens the member panel for browsing open clans.\n"
+            "Pick filters and click **Search Clans**.\n"
+            "Each result shows a slim card; use the buttons to flip views."
         ),
-        inline=False
-    )
-
-    e.add_field(
-        name="For Members",
-        value=(
-        "• `!clansearch` — Open the member panel. Pick filters and click **Search Clans**.\n"
-        "  Each result shows a slim card; use the buttons **See clan profile** or **See entry criteria** to flip views."
+        "clan": (
+            "`!clan <tag or name>`\n"
+            "Show a full clan profile (level, rank, leadership, CB/Hydra/Chimera ranges, "
+            "CvC & Siege stats, progression, playstyle).\n"
+            "💡 React with the bulb to flip to entry criteria."
         ),
-        inline=False
-    )
-
-    e.add_field(
-        name="Admin / Maintenance",
-        value=(
-            "• `!reload` — Clear the sheet cache (forces fresh data on next search)\n"
-            "• `!health` — Bot & Sheets status (latency, worksheet health, uptime)\n"
-            "• `!ping` — Quick “bot alive” check"
+        "reload": (
+            "`!reload`\n"
+            "Admin/Recruitment Lead only. Clears the sheet cache so the next search fetches fresh data."
         ),
-        inline=False
-    )
+        "health": (
+            "`!health`\n"
+            "Admin/Recruitment Lead only. Shows bot status, latency, worksheet health, and uptime."
+        ),
+        "ping": (
+            "`!ping`\n"
+            "Admin/Recruitment Lead only. Quick bot-alive check."
+        ),
+    }
 
-    e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
-    await ctx.reply(embed=e, mention_author=False)
+    # --- overview help ---
+    if not topic:
+        e = discord.Embed(
+            title="C1C-Matchmaker — Help",
+            description=(
+                "Helps recruiters place new players into the right clan, and lets members "
+                "browse open spots and entry criteria.\n\n"
+                "Use `!help <command>` for detailed help (e.g., `!help clanmatch`)."
+            ),
+            color=discord.Color.blurple()
+        )
+        thumb = padded_emoji_url(ctx.guild, "C1C")
+        if thumb:
+            e.set_thumbnail(url=thumb)
+        elif not STRICT_EMOJI_PROXY:
+            em = emoji_for_tag(ctx.guild, "C1C")
+            if em:
+                e.set_thumbnail(url=str(em.url))
 
-@bot.command(name="forcesummary")
-async def force_summary(ctx):
-    embed = build_recruiters_summary_embed(ctx.guild)
-    await ctx.send(embed=embed)
+        e.add_field(
+            name="For Recruiters",
+            value="`!clanmatch`, `!clan <tag>`",
+            inline=False
+        )
+        e.add_field(
+            name="For Members",
+            value="`!clansearch`",
+            inline=False
+        )
+        e.add_field(
+            name="Admin / Maintenance",
+            value="`!reload`, `!health`, `!ping`",
+            inline=False
+        )
+        e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
+        return await ctx.reply(embed=e, mention_author=False)
+
+    # --- specific help page ---
+    txt = pages.get(topic)
+    if not txt:
+        log.warning("Unknown help topic requested: %s", topic)
+        return
+
+    e = discord.Embed(title=f"!help {topic}", description=txt, color=discord.Color.blurple())
+    return await ctx.reply(embed=e, mention_author=False)
+
 
 # ------------------- Commands: panels -------------------
 async def _safe_delete(message: discord.Message):
@@ -1585,6 +1610,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
 async def mmhealth(ctx):
     import os, platform
     await ctx.send(f"🟢 Matchmaker OK | host={os.getenv('RENDER_INSTANCE','?')} | py={platform.python_version()}")
+
 
 
 @commands.cooldown(1, 2, commands.BucketType.user)
@@ -2118,6 +2144,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
