@@ -1395,6 +1395,7 @@ class ClanMatchView(discord.ui.View):
 
 
 # ------------------- Help (custom) -------------------
+
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     e = discord.Embed(
@@ -1741,6 +1742,15 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
 
 # ------------------- Reaction flip: 💡 -------------------
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return  # ignore silently
+    try:
+        await ctx.reply(f"⚠️ Command error: `{type(error).__name__}: {error}`")
+    except:
+        pass
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
@@ -2108,6 +2118,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
