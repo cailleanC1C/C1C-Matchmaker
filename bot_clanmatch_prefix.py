@@ -25,6 +25,13 @@ from discord.ext import tasks
 from datetime import datetime, timezone, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
+import logging
+# set up module logger
+log = logging.getLogger("c1c.matchmaker")
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
+
+
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
 
@@ -215,6 +222,10 @@ def parse_spots_num(cell_text: str) -> int:
     m = re.search(r"\d+", cell_text or "")
     return int(m.group()) if m else 0
 
+def parse_inactives_num(cell_text: str) -> int:
+    m = re.search(r"\d+", cell_text or "")
+    return int(m.group()) if m else 0
+
 def row_matches(row, cb, hydra, chimera, cvc, siege, playstyle) -> bool:
     if len(row) <= IDX_AB:
         return False
@@ -293,15 +304,28 @@ def build_entry_criteria_classic(row) -> str:
 
 def format_filters_footer(cb, hydra, chimera, cvc, siege, playstyle, roster_mode) -> str:
     parts = []
-    if cb: parts.append(f"CB: {cb}")
-    if hydra: parts.append(f"Hydra: {hydra}")
-    if chimera: parts.append(f"Chimera: {chimera}")
-    if cvc is not None:   parts.append(f"CvC: {'Yes' if cvc == '1' else 'No'}")
-    if siege is not None: parts.append(f"Siege: {'Yes' if siege == '1' else 'No'}")
-    if playstyle: parts.append(f"Playstyle: {playstyle}")
-    roster_text = "All" if roster_mode is None else ("Open only" if roster_mode == "open" else "Full only")
+    if cb:
+        parts.append(f"CB: {cb}")
+    if hydra:
+        parts.append(f"Hydra: {hydra}")
+    if chimera:
+        parts.append(f"Chimera: {chimera}")
+    if cvc is not None:
+        parts.append(f"CvC: {'Yes' if cvc == '1' else 'No'}")
+    if siege is not None:
+        parts.append(f"Siege: {'Yes' if siege == '1' else 'No'}")
+    if playstyle:
+        parts.append(f"Playstyle: {playstyle}")
+
+    roster_text = (
+        "Open only" if roster_mode == "open" else
+        "Inactives only" if roster_mode == "inactives" else
+        "Full only" if roster_mode == "full" else
+        "All"
+    )
     parts.append(f"Roster: {roster_text}")
     return " • ".join(parts)
+
 
 def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | None = None) -> discord.Embed:
     clan     = (row[COL_B_CLAN] or "").strip()
@@ -1080,6 +1104,9 @@ class ClanMatchView(discord.ui.View):
                     if self.roster_mode == "open":
                         child.label = "Open Spots Only"
                         child.style = discord.ButtonStyle.success
+                    elif self.roster_mode == "inactives":
+                        child.label = "Inactives Only"
+                        child.style = discord.ButtonStyle.danger
                     elif self.roster_mode == "full":
                         child.label = "Full Only"
                         child.style = discord.ButtonStyle.primary
@@ -1107,9 +1134,12 @@ class ClanMatchView(discord.ui.View):
                     continue
                 if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                     spots_num = parse_spots_num(row[COL_E_SPOTS])
+                    inact_num = parse_inactives_num(row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "")
                     if self.roster_mode == "open" and spots_num <= 0:
                         continue
                     if self.roster_mode == "full" and spots_num > 0:
+                        continue
+                    if self.roster_mode == "inactives" and inact_num <= 0:
                         continue
                     matches.append(row)
             except Exception:
@@ -1243,11 +1273,13 @@ class ClanMatchView(discord.ui.View):
 
     @discord.ui.button(label="Open Spots Only", style=discord.ButtonStyle.success, row=4, custom_id="roster_btn")
     async def toggle_roster(self, itx: discord.Interaction, button: discord.ui.Button):
-        # Cycle: 'open' → None (any) → 'full' → 'open'
+        # Cycle: 'open' → 'inactives' → 'full' → None (any) → 'open'
         if self.roster_mode == "open":
-            self.roster_mode = None
-        elif self.roster_mode is None:
+            self.roster_mode = "inactives"
+        elif self.roster_mode == "inactives":
             self.roster_mode = "full"
+        elif self.roster_mode == "full":
+            self.roster_mode = None
         else:
             self.roster_mode = "open"
         self._sync_visuals()
@@ -1256,7 +1288,6 @@ class ClanMatchView(discord.ui.View):
         except InteractionResponded:
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
-
 
     @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=4)
     async def reset_filters(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -1294,9 +1325,12 @@ class ClanMatchView(discord.ui.View):
                         continue
                     if row_matches(row, self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle):
                         spots_num = parse_spots_num(row[COL_E_SPOTS])
+                        inact_num = parse_inactives_num(row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "")
                         if self.roster_mode == "open" and spots_num <= 0:
                             continue
                         if self.roster_mode == "full" and spots_num > 0:
+                            continue
+                        if self.roster_mode == "inactives" and inact_num <= 0:
                             continue
                         matches.append(row)
                 except Exception:
@@ -1542,9 +1576,10 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
     embed = discord.Embed(
         title="Find a C1C Clan for your recruit",
         description=panel_intro("match", ctx.author.mention, private=False) + "\n\n"
-                    "Pick any filters (you can leave some blank) and click **Search Clans**.\n"
-                    "**Tip:** choose the most important criteria for your recruit — *but don’t go overboard*. "
-                    "Too many filters might narrow things down to zero."
+                    "Pick any filters (*you can leave some blank*) and click **Search Clans**.\n"
+                    "ℹ️Choose the **most important criteria** for your recruit — *but don’t go overboard*. "
+                    "Too many filters might narrow things down to zero.\n"
+                    "ℹ️Click the green button **Open Spots only** to switch to **Clans with inactives** or **Full clans** or **All clans** ."
     )
     embed.set_footer(text="Only the summoner can use this panel.")
 
@@ -1839,7 +1874,7 @@ async def ping(ctx):
     if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
         await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!ping`.", mention_author=False)
         return
-    await ctx.send("✅ I’m alive and listening, captain!")
+    await ctx.send("🏓 Pong — Live and listening.")
 
 
 @bot.command(name="health", aliases=["status"])
@@ -2144,6 +2179,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
