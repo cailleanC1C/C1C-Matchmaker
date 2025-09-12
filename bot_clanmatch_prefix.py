@@ -144,6 +144,51 @@ IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
 IDX_AF_INACTIVES = 31
 
 # ------------------- Helpers -------------------
+# --- helper: build an attachment-based thumbnail from a server emoji ---
+async def build_tag_thumbnail(guild: discord.Guild | None, tag: str | None, *, size: int = 256, box: float = 0.88):
+    """
+    Returns (discord.File, attachment_url) or (None, None).
+    Use with: embed.set_thumbnail(url=attachment_url) and send with files=[file].
+    """
+    if not guild or not tag:
+        return None, None
+    emj = get(guild.emojis, name=tag.strip())
+    if not emj:
+        return None, None
+
+    raw = await emj.read()  # discord.py 2.x
+
+    import io
+    from PIL import Image
+    buf = io.BytesIO(raw)
+    img = Image.open(buf).convert("RGBA")
+
+    # Trim transparent borders
+    alpha = img.split()[-1]
+    bbox = alpha.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    # Scale into square canvas
+    w, h = img.size
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    target = int(size * max(0.2, min(0.95, box)))
+    scale  = target / float(max(w, h) or 1)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    img = img.resize((nw, nh), RESAMPLE_LANCZOS)
+    x, y = (size - nw) // 2, (size - nh) // 2
+    canvas.paste(img, (x, y), img)
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")
+    out.seek(0)
+
+    filename = f"tag_{emj.id}.png"
+    file = discord.File(fp=out, filename=filename)
+    return file, f"attachment://{filename}"
+
+
+
 def norm(s: str) -> str:
     return (s or "").strip().upper()
 
@@ -785,7 +830,7 @@ class PagedResultsView(discord.ui.View):
 class MemberSearchPagedView(discord.ui.View):
     """
     Member search: paginated single message, with a global view-mode toggle
-    that flips the whole page between Lite / Entry / Profile.
+    that flips the whole page between Lite / Entry / Profile. Uses attachments.
     """
     def __init__(self, *, author_id: int, rows, filters_text: str, guild: discord.Guild | None, timeout: float = 900):
         super().__init__(timeout=timeout)
@@ -823,13 +868,56 @@ class MemberSearchPagedView(discord.ui.View):
                     max_page = max(0, math.ceil(len(self.rows) / PAGE_SIZE) - 1)
                     child.disabled = (self.page >= max_page)
 
+    async def _build_page(self):
+        def _build(row):
+            if self.mode == "entry":
+                return make_embed_for_row_search(row, self.filters_text, self.guild)
+            if self.mode == "profile":
+                return make_embed_for_profile_member(row, self.filters_text, self.guild)
+            return make_embed_for_row_lite(row, self.filters_text, self.guild)
+
+        start = self.page * PAGE_SIZE
+        end   = min(len(self.rows), start + PAGE_SIZE)
+        slice_ = self.rows[start:end]
+
+        embeds, files = [], []
+        for r in slice_:
+            e = _build(r)
+            tag = (r[COL_C_TAG] or "").strip()
+            f, u = await build_tag_thumbnail(self.guild, tag)
+            if u and f:
+                e.set_thumbnail(url=u)
+                files.append(f)
+            embeds.append(e)
+
+        if embeds:
+            total_pages = max(1, math.ceil(len(self.rows) / PAGE_SIZE))
+            page_info = f"Page {self.page + 1}/{total_pages} • {len(self.rows)} total"
+            last = embeds[-1]; ft = last.footer.text or ""
+            last.set_footer(text=f"{ft} • {page_info}" if ft else page_info)
+
+        return embeds, files
+
     async def _edit(self, itx: discord.Interaction):
-        self._sync_buttons()
-        embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+        # Acknowledge the interaction so we can use followups safely.
         try:
-            await itx.response.edit_message(embeds=embeds, view=self)
+            await itx.response.defer()  # no visible message yet
         except InteractionResponded:
-            await itx.followup.edit_message(message_id=itx.message.id, embeds=embeds, view=self)
+            pass
+
+        self._sync_buttons()
+        embeds, files = await self._build_page()
+
+        # Send a fresh message so the new attachments are present; then remove the old one.
+        sent = await itx.followup.send(embeds=embeds, files=files, view=self)
+
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
+        self.message = sent
+
 
     # --- View mode buttons (row 0) ---
     @discord.ui.button(emoji="📇", label="Short view", style=discord.ButtonStyle.primary, row=0, custom_id="ms_lite")
@@ -868,7 +956,7 @@ class MemberSearchPagedView(discord.ui.View):
         except Exception:
             for child in self.children:
                 child.disabled = True
-            embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+            embeds, _files = await self._build_page()
             if embeds:
                 last = embeds[-1]; ft = last.footer.text or ""
                 last.set_footer(text=f"{ft} • Panel closed" if ft else "Panel closed")
@@ -882,7 +970,7 @@ class MemberSearchPagedView(discord.ui.View):
             for child in self.children:
                 child.disabled = True
             if self.message:
-                embeds = _page_embeds_search(self.rows, self.page, self.mode, self.filters_text, self.guild)
+                embeds, _files = await self._build_page()
                 if embeds:
                     last = embeds[-1]; ft = last.footer.text or ""
                     last.set_footer(text=f"{ft} • Expired" if ft else "Expired")
@@ -1310,13 +1398,13 @@ class ClanMatchView(discord.ui.View):
         ]):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂", ephemeral=True)
             return
-
+    
         # Acknowledge the click so we can use followup messages
         await itx.response.defer(thinking=True)
-
+    
         try:
             rows = get_rows(False)
-
+    
             # Build matches
             matches = []
             for row in rows[1:]:
@@ -1335,14 +1423,14 @@ class ClanMatchView(discord.ui.View):
                         matches.append(row)
                 except Exception:
                     continue
-
+    
             if not matches:
                 await itx.followup.send(
                     "No matching clans found. You might have set too many filter criteria — try again with fewer.",
                     ephemeral=False
                 )
                 return
-
+    
             # Soft-cap the number of results we show
             total_found = len(matches)
             cap = max(1, SEARCH_RESULTS_SOFT_CAP)
@@ -1350,16 +1438,15 @@ class ClanMatchView(discord.ui.View):
             if total_found > cap:
                 matches = matches[:cap]
                 cap_note = f"first {cap} of {total_found}"
-
+    
             # Build footer text (and include cap note if we truncated)
             filters_text = format_filters_footer(
-            self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
+                self.cb, self.hydra, self.chimera, self.cvc, self.siege, self.playstyle, self.roster_mode
             )
             if cap_note:
                 filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
-
-
-            # ----- MEMBER "SEARCH" VARIANT -----
+    
+            # ----- MEMBER "SEARCH" VARIANT (attachments) -----
             if self.embed_variant == "search":
                 view = MemberSearchPagedView(
                     author_id=itx.user.id,
@@ -1368,16 +1455,41 @@ class ClanMatchView(discord.ui.View):
                     guild=itx.guild,
                     timeout=900
                 )
-                embeds = _page_embeds_search(matches, 0, "lite", filters_text, itx.guild)
-                sent = await itx.followup.send(embeds=embeds, view=view)
+    
+                # Build page 0 with attachments
+                def _build(row):
+                    # default mode is "lite"
+                    return make_embed_for_row_lite(row, filters_text, itx.guild)
+    
+                start = 0
+                end = min(len(matches), PAGE_SIZE)
+                slice_ = matches[start:end]
+    
+                embeds, files = [], []
+                for r in slice_:
+                    e = _build(r)
+                    tag = (r[COL_C_TAG] or "").strip()
+                    f, u = await build_tag_thumbnail(itx.guild, tag)
+                    if u and f:
+                        e.set_thumbnail(url=u)
+                        files.append(f)
+                    embeds.append(e)
+    
+                if embeds:
+                    total_pages = max(1, math.ceil(len(matches) / PAGE_SIZE))
+                    page_info = f"Page 1/{total_pages} • {len(matches)} total"
+                    last = embeds[-1]; ft = last.footer.text or ""
+                    last.set_footer(text=f"{ft} • {page_info}" if ft else page_info)
+    
+                sent = await itx.followup.send(embeds=embeds, files=files, view=view)
                 view.message = sent
                 self.results_message = sent
                 return
-
-            # ----- RECRUITER "CLASSIC" VARIANT -----
+    
+            # ----- RECRUITER "CLASSIC" VARIANT (unchanged display; no attachments) -----
             builder = make_embed_for_row_classic
             total = len(matches)
-
+    
             if total <= PAGE_SIZE:
                 embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
                 self._active_view = None
@@ -1392,8 +1504,8 @@ class ClanMatchView(discord.ui.View):
                     sent = await itx.followup.send(embeds=embeds)
                     self.results_message = sent
                 return
-
-            # Paged
+    
+            # Paged (classic)
             view = PagedResultsView(
                 author_id=itx.user.id,
                 rows=matches,
@@ -1403,7 +1515,7 @@ class ClanMatchView(discord.ui.View):
                 timeout=300
             )
             embeds = _page_embeds(matches, 0, builder, filters_text, itx.guild)
-
+    
             if self.results_message:
                 try:
                     await self.results_message.edit(embeds=embeds, view=view)
@@ -1420,13 +1532,12 @@ class ClanMatchView(discord.ui.View):
                 self.results_message = sent
                 self._active_view = view
                 view.message = sent
-
+    
         except Exception as e:
             try:
                 await itx.followup.send(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
             except Exception:
                 pass
-
 
 # ------------------- Help (custom) -------------------
 @bot.command(name="help")
@@ -1777,6 +1888,7 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
+# ------------------- Clan profile command (patched for attachment thumbnail) -------------------
 @bot.command(name="clan")
 async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
     if not query:
@@ -1787,10 +1899,26 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
         if not row:
             await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
             return
+
+        # Build the profile embed as before
         embed = make_embed_for_profile(row, ctx.guild)
-        msg = await ctx.reply(embed=embed, mention_author=False)
-        try: await msg.add_reaction("💡")
-        except Exception: pass
+
+        # NEW: build attachment for top-right clan tag and send with files=[...]
+        tag = (row[COL_C_TAG] or "").strip()
+        file, url = await build_tag_thumbnail(ctx.guild, tag)
+        if url:
+            embed.set_thumbnail(url=url)
+            msg = await ctx.reply(embed=embed, files=[file], mention_author=False)
+        else:
+            # Fallback: send without thumbnail if we couldn't build one
+            msg = await ctx.reply(embed=embed, mention_author=False)
+
+        # Keep the 💡 flip and index registration exactly as before
+        try:
+            await msg.add_reaction("💡")
+        except Exception:
+            pass
+
         REACT_INDEX[msg.id] = {
             "row": row,
             "kind": "entry_from_profile",
@@ -1798,7 +1926,9 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
             "channel_id": msg.channel.id,
             "filters": "",
         }
+
         await _safe_delete(ctx.message)
+
     except Exception as e:
         await ctx.reply(f"❌ Error: {type(e).__name__}: {e}", mention_author=False)
 
@@ -2179,13 +2309,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
