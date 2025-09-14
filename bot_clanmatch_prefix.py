@@ -1905,7 +1905,7 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
 
         # NEW: build attachment for top-right clan tag and send with files=[...]
         tag = (row[COL_C_TAG] or "").strip()
-        file, url = await build_tag_thumbnail(self.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
+        file, url = await build_tag_thumbnail(ctx.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
         if url:
             embed.set_thumbnail(url=url)
             msg = await ctx.reply(embed=embed, files=[file], mention_author=False)
@@ -2309,4 +2309,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
