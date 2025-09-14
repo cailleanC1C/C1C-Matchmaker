@@ -1469,7 +1469,7 @@ class ClanMatchView(discord.ui.View):
                 for r in slice_:
                     e = _build(r)
                     tag = (r[COL_C_TAG] or "").strip()
-                    f, u = await build_tag_thumbnail(itx.guild, tag)
+                    f, u = await build_tag_thumbnail(itx.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
                     if u and f:
                         e.set_thumbnail(url=u)
                         files.append(f)
@@ -1905,7 +1905,7 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
 
         # NEW: build attachment for top-right clan tag and send with files=[...]
         tag = (row[COL_C_TAG] or "").strip()
-        file, url = await build_tag_thumbnail(ctx.guild, tag)
+        file, url = await build_tag_thumbnail(self.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
         if url:
             embed.set_thumbnail(url=url)
             msg = await ctx.reply(embed=embed, files=[file], mention_author=False)
@@ -2309,3 +2309,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
