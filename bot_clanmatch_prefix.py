@@ -59,10 +59,10 @@ ALLOWED_EMOJI_HOSTS = {
     "media.discordapp.net",
 }
 
-# Max bytes we'll download for an emoji file (2 MB default)
+# Max bytes we'll download for an emoji file (2 MB default) Padded-emoji tunables
 EMOJI_MAX_BYTES = int(os.environ.get("EMOJI_MAX_BYTES", "2000000"))
-
-# Padded-emoji tunables
+TAG_BADGE_PX  = int(os.environ.get("TAG_BADGE_PX", "128"))   # 96–128 feels good
+TAG_BADGE_BOX = float(os.environ.get("TAG_BADGE_BOX", "0.90"))
 EMOJI_PAD_SIZE = int(os.environ.get("EMOJI_PAD_SIZE", "256"))   # canvas px
 EMOJI_PAD_BOX  = float(os.environ.get("EMOJI_PAD_BOX", "0.85")) # glyph fill (0..1)
 STRICT_EMOJI_PROXY = os.environ.get("STRICT_EMOJI_PROXY", "1") == "1"  # if True: no raw fallback
@@ -395,13 +395,15 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
-    thumb = padded_emoji_url(guild, tag)
-    if thumb:
-        e.set_thumbnail(url=thumb)
-    elif not STRICT_EMOJI_PROXY:
-        em = emoji_for_tag(guild, tag)
-        if em:
-            e.set_thumbnail(url=str(em.url))
+    # Classic recruiter view: skip tag thumbnails to save space
+    if SHOW_TAG_IN_CLASSIC:
+        thumb = padded_emoji_url(guild, tag)
+        if thumb:
+            e.set_thumbnail(url=thumb)
+        elif not STRICT_EMOJI_PROXY:
+            em = emoji_for_tag(guild, tag)
+            if em:
+                e.set_thumbnail(url=str(em.url))
 
     e.set_footer(text=f"Filters used: {filters_text}")
     return e
@@ -884,7 +886,7 @@ class MemberSearchPagedView(discord.ui.View):
         for r in slice_:
             e = _build(r)
             tag = (r[COL_C_TAG] or "").strip()
-            f, u = await build_tag_thumbnail(self.guild, tag)
+            f, u = await build_tag_thumbnail(self.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
             if u and f:
                 e.set_thumbnail(url=u)
                 files.append(f)
@@ -2309,5 +2311,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
