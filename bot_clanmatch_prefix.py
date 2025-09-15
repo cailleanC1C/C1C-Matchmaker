@@ -90,6 +90,10 @@ PANEL_THREAD_ARCHIVE_MIN = int(os.environ.get("PANEL_THREAD_ARCHIVE_MIN", "10080
 
 SEARCH_RESULTS_SOFT_CAP = int(os.environ.get("SEARCH_RESULTS_SOFT_CAP", "25"))
 
+# Show tag thumbnails on recruiter "classic" results? default off to save space
+SHOW_TAG_IN_CLASSIC = os.environ.get("SHOW_TAG_IN_CLASSIC", "0") == "1"
+
+
 # ------------------- Sheets (lazy + cache) -------------------
 _gc = None
 _ws = None
@@ -2311,6 +2315,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
