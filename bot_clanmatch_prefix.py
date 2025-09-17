@@ -31,6 +31,18 @@ log = logging.getLogger("c1c.matchmaker")
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO)
 
+# --- self-recovery globals  ---
+import sys
+import time
+
+BOT_CONNECTED: bool = False
+_LAST_READY_TS: float = 0.0
+_LAST_DISCONNECT_TS: float = 0.0
+_LAST_EVENT_TS: float = 0.0  # for zombie detection (no events for too long)
+
+# Platform probe behavior: if 1, platform probes get deep status (200/206/503).
+# If 0 (default), `/` and `/ready` always return 200 while `/healthz` is the deep check.
+STRICT_PROBE = os.environ.get("STRICT_PROBE", "0") == "1"
 
 # ------------------- boot/uptime -------------------
 START_TS = time.time()
@@ -40,9 +52,13 @@ def _fmt_uptime():
     h, r = divmod(secs, 3600)
     m, s = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
-    
-BOT_CONNECTED = False
-_LAST_READY_TS = 0.0
+
+def _now() -> float:
+    return time.time()
+
+def _mark_event() -> None:
+    global _LAST_EVENT_TS
+    _LAST_EVENT_TS = _now()
 
 # ------------------- ENV -------------------
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
@@ -2015,7 +2031,6 @@ async def ping(ctx):
 
 @bot.command(name="health", aliases=["status"])
 async def health_prefix(ctx: commands.Context):
-    # Admin or Recruitment Lead only
     if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
         await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!health`.", mention_author=False)
         return
@@ -2026,9 +2041,19 @@ async def health_prefix(ctx: commands.Context):
             sheets_status = f"OK (`{WORKSHEET_NAME}`)"
         except Exception as e:
             sheets_status = f"ERROR: {type(e).__name__}"
+
         latency_ms = round(bot.latency * 1000) if bot.latency is not None else -1
-        await ctx.reply(f"🟢 Bot OK | Latency: {latency_ms} ms | Sheets: {sheets_status} | Uptime: {_fmt_uptime()}",
-                        mention_author=False)
+        last_event_age = int(_now() - _LAST_EVENT_TS) if _LAST_EVENT_TS else None
+        connected = "🟢 connected" if BOT_CONNECTED else "🔴 disconnected"
+
+        parts = [
+            f"{connected}",
+            f"Latency: {latency_ms} ms",
+            f"Sheets: {sheets_status}",
+            f"Uptime: {_fmt_uptime()}",
+            f"Last event age: {last_event_age}s" if last_event_age is not None else "Last event age: —",
+        ]
+        await ctx.reply(" | ".join(parts), mention_author=False)
         await _safe_delete(ctx.message)
     except Exception as e:
         await ctx.reply(f"⚠️ Health error: `{type(e).__name__}: {e}`", mention_author=False)
@@ -2113,10 +2138,36 @@ async def scheduled_cleanup():
 
 # ------------------- Events -------------------
 @bot.event
+async def on_socket_response(payload):
+    _mark_event()
+
+@bot.event
+async def on_connect():
+    # ADD these two lines if you already have on_connect()
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _mark_event()
+
+@bot.event
+async def on_resumed():
+    # ADD this event; or merge into existing if present
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _mark_event()
+    # optional: log.info("Gateway resumed")
+
+@bot.event
 async def on_ready():
     global BOT_CONNECTED, _LAST_READY_TS
     BOT_CONNECTED = True
-    _LAST_READY_TS = time.time()    
+    _LAST_READY_TS = _now()  
+    _mark_event()
+    # start watchdog once
+    try:
+        if not _watchdog.is_running():    
+            _watchdog.start()             
+    except NameError:
+        pass
     print(f"[ready] Logged in as {bot.user} ({bot.user.id})", flush=True)
     try:
         synced = await bot.tree.sync()
@@ -2127,12 +2178,17 @@ async def on_ready():
     # kick off the daily poster (safe to call repeatedly)
     if not daily_recruiters_update.is_running():
         daily_recruiters_update.start()
+        
     # Start scheduled cleanup
     if not scheduled_cleanup.is_running():
         scheduled_cleanup.start()
+        
     # Start the watchdog loop (exits the process if Discord stays disconnected)
-    if not watchdog.is_running():
-        watchdog.start()
+    try:
+        if not _watchdog.is_running():
+            _watchdog.start()
+    except NameError:
+        pass
 
     # Start the Sheets refresh scheduler (3x/day via REFRESH_TIMES)
     global _SHEETS_REFRESH_TASK
@@ -2141,28 +2197,105 @@ async def on_ready():
 
 @bot.event
 async def on_disconnect():
-    global BOT_CONNECTED
-    BOT_CONNECTED = False
+    global BOT_CONNECTED, _LAST_DISCONNECT_TS
+    BOT_CONNECTED = False                 
+    _LAST_DISCONNECT_TS = _now()          
+
+# ------------------- WATCHDOG -------------------
 
 WATCHDOG_CHECK_SEC = int(os.environ.get("WATCHDOG_CHECK_SEC", "60"))
 WATCHDOG_MAX_DISCONNECT_SEC = int(os.environ.get("WATCHDOG_MAX_DISCONNECT_SEC", "600"))  # 10 min
 
+async def _maybe_restart(reason: str):
+    try:
+        log.warning(f"[WATCHDOG] Restarting: {reason}")
+    except NameError:
+        print(f"[WATCHDOG] Restarting: {reason}")
+    try:
+        await bot.close()
+    finally:
+        sys.exit(1)
+
 @tasks.loop(seconds=WATCHDOG_CHECK_SEC)
-async def watchdog():
+async def _watchdog():
+    now = _now()
+
+    # If connected, check for zombie state (no events for a long while + bad latency)
     if BOT_CONNECTED:
-        return
-    # if we've been disconnected too long, exit so the platform restarts us
-    if _LAST_READY_TS and (time.time() - _LAST_READY_TS) > WATCHDOG_MAX_DISCONNECT_SEC:
-        print("[watchdog] Disconnected too long; exiting for clean restart.", flush=True)
+        idle_for = (now - _LAST_EVENT_TS) if _LAST_EVENT_TS else 0
         try:
-            await bot.close()
-        finally:
-            import sys
-            sys.exit(1)
+            latency = getattr(bot, "latency", None)
+        except Exception:
+            latency = None
+
+        # 10 min without any events is suspicious; adjust to your traffic level.
+        if _LAST_EVENT_TS and idle_for > 600 and (latency is None or latency > 10):
+            await _maybe_restart(f"zombie: no events for {int(idle_for)}s, latency={latency}")
+        return
+
+    # Disconnected: measure real outage time from the last disconnect moment
+    global _LAST_DISCONNECT_TS
+    if not _LAST_DISCONNECT_TS:
+        # first time we noticed the disconnect — start the timer
+        _LAST_DISCONNECT_TS = now
+        return
+
+    down_for = now - _LAST_DISCONNECT_TS
+    if down_for > WATCHDOG_MAX_DISCONNECT_SEC:
+        await _maybe_restart(f"disconnected too long: {int(down_for)}s")
+
 
 
 # ------------------- Tiny web server + image-pad proxy -------------------
-async def _health_http(_req): return web.Response(text="ok")
+
+def _last_event_age_s() -> int | None:
+    return int(_now() - _LAST_EVENT_TS) if _LAST_EVENT_TS else None
+
+async def _health_json(_req):
+    # 200 when connected; 503 when disconnected; 206 “partial” if zombie hint
+    connected = BOT_CONNECTED
+    age = _last_event_age_s()
+    latency = None
+    try:
+        latency = getattr(bot, "latency", None)
+        if latency is not None:
+            latency = float(latency)
+    except Exception:
+        latency = None
+
+    status = 200 if connected else 503
+    # Heuristic: connected but no events for >600s and latency None/huge → partial
+    if connected and age is not None and age > 600 and (latency is None or latency > 10):
+        status = 206  # “partial content” -> signals zombie-ish to your monitor
+
+    body = {
+        "ok": connected,
+        "connected": connected,
+        "uptime": _fmt_uptime(),
+        "last_event_age_s": age,
+        "latency_s": latency,
+    }
+    return web.json_response(body, status=status)
+
+async def _health_json_ok_always(_req):
+    # Same payload as _health_json, but always HTTP 200 to avoid host flaps.
+    connected = BOT_CONNECTED
+    age = _last_event_age_s()
+    try:
+        latency = getattr(bot, "latency", None)
+        latency = float(latency) if latency is not None else None
+    except Exception:
+        latency = None
+    body = {
+        "ok": connected,
+        "connected": connected,
+        "uptime": _fmt_uptime(),
+        "last_event_age_s": age,
+        "latency_s": latency,
+        "strict_probe": STRICT_PROBE,
+    }
+    return web.json_response(body, status=200)
+
 
 async def emoji_pad_handler(request: web.Request):
     """
@@ -2277,26 +2410,37 @@ async def emoji_pad_handler(request: web.Request):
     except Exception as e:
         return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
-async def ready_http(_req):
-    status = 200 if BOT_CONNECTED else 503
-    return web.json_response({"ok": BOT_CONNECTED, "uptime": _fmt_uptime()}, status=status)
-
 async def start_webserver():
     app = web.Application()
     app["session"] = ClientSession()
     async def _close_session(app):
         await app["session"].close()
     app.on_cleanup.append(_close_session)
-    app.router.add_get("/ready", ready_http)
-    app.router.add_get("/", _health_http)
-    app.router.add_get("/health", _health_http)
+
+    # Platform-safe defaults:
+    # - When STRICT_PROBE=0 (default): `/`, `/ready`, `/health` always 200
+    # - When STRICT_PROBE=1: platform probes use deep status (200/206/503)
+    if STRICT_PROBE:
+        app.router.add_get("/", _health_json)
+        app.router.add_get("/ready", _health_json)
+        app.router.add_get("/health", _health_json)
+    else:
+        app.router.add_get("/", _health_json_ok_always)
+        app.router.add_get("/ready", _health_json_ok_always)
+        app.router.add_get("/health", _health_json_ok_always)
+
+    # Deep health endpoint for your monitoring/alerts (can return 206 on zombie-ish)
+    app.router.add_get("/healthz", _health_json)
+
+    # Existing emoji pad proxy
     app.router.add_get("/emoji-pad", emoji_pad_handler)
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[keepalive] HTTP server listening on :{port}", flush=True)
+    print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
 
 
 # ------------------- Boot both -------------------
@@ -2315,8 +2459,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
