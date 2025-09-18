@@ -2468,9 +2468,13 @@ LOG_CHANNEL_ID = 1415330837968191629  # your shared log channel
 C1C_FOOTER_ICON_URL = os.getenv("C1C_FOOTER_ICON_URL","") or None  # put your blue flame/crest URL here
 
 def get_welcome_rows():
-    # return list[dict] from the "WelcomeTemplates" tab in your existing sheet
-    ws = SHEET.worksheet(os.getenv("WELCOME_SHEET_TAB","WelcomeTemplates"))
-    return ws.get_all_records()  # relies on your existing gspread client
+    """Return list[dict] from the WelcomeTemplates tab in the same spreadsheet."""
+    tab = os.getenv("WELCOME_SHEET_TAB", "WelcomeTemplates")
+    creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SHEET_ID)
+    ws = sh.worksheet(tab)
+    return ws.get_all_records()
 
 welcome_cog = Welcome(
     bot,
@@ -2482,7 +2486,12 @@ welcome_cog = Welcome(
     enabled_default=WELCOME_ENABLED,
 )
 bot.add_cog(welcome_cog)
-await welcome_cog.reload_templates()
+# Prime the Welcome templates (once, on first ready)
+try:
+    await welcome_cog.reload_templates()
+except Exception as e:
+    print(f"[welcome] initial template load failed: {type(e).__name__}: {e}", flush=True)
+
 
 # ------------------- Boot both -------------------
 async def main():
@@ -2500,4 +2509,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
