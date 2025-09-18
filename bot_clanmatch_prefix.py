@@ -2211,8 +2211,16 @@ async def on_ready():
     if _SHEETS_REFRESH_TASK is None or _SHEETS_REFRESH_TASK.done():
         _SHEETS_REFRESH_TASK = bot.loop.create_task(sheets_refresh_scheduler())
 
-# Prime Welcome templates once
-    global _WELCOME_PRIMED
+# --- Welcome module wiring (discord.py v2: add_cog is async) ---
+    global _WELCOME_ADDED, _WELCOME_PRIMED
+    if not _WELCOME_ADDED:
+        try:
+            await bot.add_cog(welcome_cog)
+            _WELCOME_ADDED = True
+            print("[welcome] cog added", flush=True)
+        except Exception as e:
+            print(f"[welcome] add_cog failed: {type(e).__name__}: {e}", flush=True)
+
     if not _WELCOME_PRIMED:
         try:
             await welcome_cog.reload_templates()
@@ -2528,3 +2536,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
