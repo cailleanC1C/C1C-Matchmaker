@@ -1,4 +1,4 @@
-# modules/welcome.py
+# welcome.py
 # C1C Matchmaker — Welcome Module 
 # embed welcome message to clan chat + hype to General
 # Logs with [c1c-matchmaker/welcome/<LEVEL>] and never fails silently.
