@@ -1,16 +1,17 @@
-# welcome.py
-# C1C Matchmaker — Welcome Module 
-# embed welcome message to clan chat + hype to General
-# Logs with [c1c-matchmaker/welcome/<LEVEL>] and never fails silently.
+# welcome.py 
+# C1C Matchmaker — Welcome Module v1.0
+# Drop-in Cog. No external deps beyond discord.py.
 
-import asyncio, re
+import asyncio
+import re
 from datetime import datetime, timezone
 from typing import Callable, Dict, Any, List, Optional
 
 import discord
 from discord.ext import commands
 
-# ===== Helpers: logging (to channel + console) =====
+
+# ---------------- Logging ----------------
 
 def _fmt_kv(**kv) -> str:
     return " ".join(f"{k}={v}" for k, v in kv.items() if v is not None)
@@ -20,58 +21,55 @@ async def log_to_channel(bot: commands.Bot, log_channel_id: int, level: str, msg
     line = f"{prefix} {msg}"
     if kv:
         line += f" • {_fmt_kv(**kv)}"
-# console
-    print(line)
-# channel
+    print(line, flush=True)
     try:
         ch = bot.get_channel(log_channel_id) or await bot.fetch_channel(log_channel_id)
         if ch:
             await ch.send(line)
     except Exception:
-# don't recurse on logging failures
-        pass
+        pass  # never recurse on log failures
 
-# ===== Helpers: placeholder + emoji =====
+
+# ---------------- Emoji handling ----------------
 
 _EMOJI_TOKEN = re.compile(r"{EMOJI:([^}]+)}")
 
 def _sanitize_emoji_name(name: str) -> str:
-# Lowercase + strip everything except [a-z0-9_]
-    return re.sub(r"[^a-z0-9_]", "", name.lower())
+    return re.sub(r"[^a-z0-9_]", "", (name or "").lower())
 
 def _resolve_emoji(guild: discord.Guild, token: str) -> str:
-    token = token.strip()
-# Try by ID
+    token = (token or "").strip()
+    # If numeric, treat as emoji ID
     if token.isdigit():
         for e in guild.emojis:
             if str(e.id) == token:
-                return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>".replace("<:", "<:").replace("<a:", "<a:")
+                return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>"
         return token
-# Try by sanitized name
-    s = _sanitize_emoji_name(token)
+    # Otherwise, match by (sanitized) name
+    want = _sanitize_emoji_name(token)
     for e in guild.emojis:
-        if e.name.lower() == s:
-            return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>".replace("<:", "<:").replace("<a:", "<a:")
+        if e.name.lower() == want:
+            return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>"
     return token
 
 def _replace_emoji_tokens(text: str, guild: discord.Guild) -> str:
     return _EMOJI_TOKEN.sub(lambda m: _resolve_emoji(guild, m.group(1)), text or "")
 
 def _emoji_cdn_url_from_id(guild: discord.Guild, emoji_id: int) -> Optional[str]:
-    """Return the Discord CDN URL for a guild emoji ID, picking .gif if animated."""
     try:
         for e in guild.emojis:
             if e.id == emoji_id:
                 ext = "gif" if e.animated else "png"
                 return f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}"
-# If not in guild cache, default to png; Discord will still serve it if exists.
+        # If not found in cache, assume png (Discord will serve it if valid)
         return f"https://cdn.discordapp.com/emojis/{emoji_id}.png"
     except Exception:
         return None
 
 
+# ---------------- Text expansion ----------------
+
 def _format_now_vienna() -> str:
-# keep deterministic: Europe/Vienna if available, else UTC
     try:
         from zoneinfo import ZoneInfo
         tz = ZoneInfo("Europe/Vienna")
@@ -79,14 +77,21 @@ def _format_now_vienna() -> str:
     except Exception:
         return datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M UTC")
 
-def _expand(text: str, guild: discord.Guild, tag: str,
-            inviter: Optional[discord.Member], target: Optional[discord.Member]) -> str:
+def _expand_basic(
+    text: str,
+    guild: discord.Guild,
+    tag: str,
+    clan_name: str,
+    inviter: Optional[discord.Member],
+    target: Optional[discord.Member],
+) -> str:
     if not text:
         return ""
     parts = {
         "{MENTION}": (target.mention if target else ""),
         "{USERNAME}": (target.display_name if target else ""),
-        "{CLAN}": tag,
+        "{CLAN}": clan_name or tag,
+        "{CLANTAG}": tag,
         "{GUILD}": guild.name,
         "{NOW}": _format_now_vienna(),
         "{INVITER}": (inviter.display_name if inviter else ""),
@@ -96,20 +101,49 @@ def _expand(text: str, guild: discord.Guild, tag: str,
     return _replace_emoji_tokens(text, guild)
 
 def _strip_empty_role_lines(text: str) -> str:
-# Remove lines where CLANLEAD/DEPUTIES placeholders resolved to blank
+    """
+    Remove 'Clan Lead:' / 'Deputies:' lines when the value is empty or a placeholder.
+    Empty set includes: '', '-', '—', 'n/a', 'none', 'not found' (case-insensitive).
+    """
+    def emptish(val: str) -> bool:
+        v = (val or "").strip().lower()
+        return v in {"", "-", "—", "n/a", "na", "none", "notfound", "not found"}
+
     lines = (text or "").splitlines()
-    cleaned = []
+    out = []
     for ln in lines:
         raw = ln.strip()
-        if ("Clan Lead" in raw or "Deputies" in raw) and re.search(r":\s*$", raw):
-# ends with ":" or ": <empty>"
+
+        m = re.match(r"^(.*\bClan\s*Lead\b\s*:\s*)(.*)$", raw, flags=re.I)
+        if m and emptish(m.group(2)):
             continue
-        cleaned.append(ln)
-# Collapse multiple blank lines
-    out = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned)).strip("\n")
+
+        m = re.match(r"^(.*\bDeput(?:y|ies)\b\s*:\s*)(.*)$", raw, flags=re.I)
+        if m and emptish(m.group(2)):
+            continue
+
+        out.append(ln)
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
+
+
+# ---------------- Row fallback merge ----------------
+
+def _merge_text_fields(primary: dict, default_row: Optional[dict]) -> dict:
+    """
+    Copy of `primary` where empty TITLE/BODY/FOOTER are filled from default_row (C1C).
+    Non-text fields remain from primary (TARGET_CHANNEL_ID, CREST_URL, CLAN, PING_USER, etc.).
+    """
+    out = dict(primary)
+    if not default_row:
+        return out
+    for k in ("TITLE", "BODY", "FOOTER"):
+        if not (out.get(k) or "").strip():
+            out[k] = default_row.get(k, "") or ""
     return out
 
-# ===== Cog =====
+
+# ---------------- Cog ----------------
 
 class Welcome(commands.Cog):
     """Welcome module for Matchmaker."""
@@ -122,7 +156,7 @@ class Welcome(commands.Cog):
         log_channel_id: int,
         general_channel_id: Optional[int],
         allowed_role_ids: set[int],
-        c1c_footer_emoji_id: Optional[int] = None,   # <-- CHANGED: emoji ID instead of URL
+        c1c_footer_emoji_id: Optional[int] = None,
         enabled_default: bool = True,
     ):
         self.bot = bot
@@ -130,23 +164,23 @@ class Welcome(commands.Cog):
         self.log_channel_id = log_channel_id
         self.general_channel_id = general_channel_id
         self.allowed_role_ids = {int(r) for r in allowed_role_ids if str(r).isdigit()}
-        self.c1c_footer_emoji_id = int(c1c_footer_emoji_id) if c1c_footer_emoji_id else None  # <-- store ID
+        self.c1c_footer_emoji_id = int(c1c_footer_emoji_id) if c1c_footer_emoji_id else None
         self.enabled_default = bool(enabled_default)
         self.enabled_override: Optional[bool] = None
-        self.cache: Dict[str, Dict[str, Any]] = {}
+
+        self.cache: Dict[str, Dict[str, Any]] = {}   # TAG -> row
         self.default_row: Optional[Dict[str, Any]] = None
 
-    
-# ----- internal state -----
+    # ----- state -----
+
     @property
     def enabled(self) -> bool:
         return self.enabled_override if self.enabled_override is not None else self.enabled_default
 
-    async def reload_templates(self, ctx_user: Optional[discord.Member] = None):
+    async def reload_templates(self, _ctx_user: Optional[discord.Member] = None):
         try:
-            rows = self.get_rows()  # list of dicts
-            cache = {}
-            default_row = None
+            rows = self.get_rows()
+            cache, default_row = {}, None
             for r in rows:
                 tag = str(r.get("TAG", "")).strip()
                 if not tag:
@@ -161,6 +195,7 @@ class Welcome(commands.Cog):
                     "CREST_URL": str(r.get("CREST_URL", "")).strip(),
                     "PING_USER": str(r.get("PING_USER", "")).strip().upper() == "Y",
                     "ACTIVE": str(r.get("ACTIVE", "")).strip().upper() == "Y",
+                    "CLAN": r.get("CLAN", "") or "",
                     "CLANLEAD": r.get("CLANLEAD", "") or "",
                     "DEPUTIES": r.get("DEPUTIES", "") or "",
                     "GENERAL_NOTICE": r.get("GENERAL_NOTICE", "") or "",
@@ -174,46 +209,46 @@ class Welcome(commands.Cog):
             await log_to_channel(self.bot, self.log_channel_id, "ERROR",
                 "Sheet error while loading templates", error=repr(e))
             raise
-
         await log_to_channel(self.bot, self.log_channel_id, "INFO",
-            "Templates reloaded",
-            rows=len(self.cache), has_default=bool(self.default_row))
+            "Templates reloaded", rows=len(self.cache), has_default=bool(self.default_row))
 
     def _effective_row(self, tag: str) -> Optional[Dict[str, Any]]:
-        """Return merged row for tag:
-           - If clan row ACTIVE=Y, use it.
-           - Else if clan row exists but inactive/partial: merge C1C text into it.
-           - Else if no clan row: return None (cannot route without channel)."""
+        """
+        Use clan row for routing; fill missing TITLE/BODY/FOOTER from C1C row.
+        If clan row doesn't exist at all -> None (we can't route without its channel).
+        """
         key = tag.upper()
         clan = self.cache.get(key)
-        if clan and clan.get("ACTIVE"):
-            return clan
-# Merge text from C1C into clan scaffold
-        if clan and self.default_row:
-            merged = dict(clan)
-# text from C1C
-            for k in ("TITLE", "BODY", "FOOTER", "PING_USER"):
-                merged[k] = self.default_row.get(k, "")
-            return merged
-# No clan row -> cannot resolve channel; return None (we will log & abort)
-        return None
+        if not clan:
+            return None
+        return _merge_text_fields(clan, self.default_row)
 
-    def _expand_all(self, text: str, guild: discord.Guild, tag: str, inviter, target, clanlead: str, deputies: str) -> str:
-# Fill simple placeholders first
+    def _expand_all(
+        self,
+        text: str,
+        guild: discord.Guild,
+        tag: str,
+        clan_name: str,
+        inviter,
+        target,
+        clanlead: str,
+        deputies: str
+    ) -> str:
         text = (text or "")
         text = text.replace("{CLANLEAD}", clanlead or "")
         text = text.replace("{DEPUTIES}", deputies or "")
-        text = _expand(text, guild, tag, inviter, target)
-        text = _strip_empty_role_lines(text)
-        return text
+        text = _expand_basic(text, guild, tag, clan_name, inviter, target)
+        return _strip_empty_role_lines(text)
 
     def _has_permission(self, member: discord.Member) -> bool:
+        # If no allowed roles configured, allow everyone (for testing).
         if not self.allowed_role_ids:
             return True
-        member_roles = {int(r.id) for r in member.roles}
+        member_roles = {int(r.id) for r in getattr(member, "roles", [])}
         return bool(member_roles & self.allowed_role_ids)
 
-    async def _send_general_notice(self, guild: discord.Guild, text: str, mention_target: Optional[discord.Member], tag: str):
+    async def _send_general_notice(self, guild: discord.Guild, text: str,
+                                   mention_target: Optional[discord.Member], tag: str, clan_name: str):
         if not self.general_channel_id:
             await log_to_channel(self.bot, self.log_channel_id, "INFO",
                 "General notice skipped", cause="general channel not set")
@@ -224,14 +259,15 @@ class Welcome(commands.Cog):
             await log_to_channel(self.bot, self.log_channel_id, "WARN",
                 "General notice skipped", cause="cannot access general channel", error=repr(e))
             return
-        expanded = _expand(text, guild, tag, inviter=None, target=mention_target)
+        expanded = _expand_basic(text, guild, tag, clan_name, inviter=None, target=mention_target)
         try:
             await ch.send(expanded)
         except Exception as e:
             await log_to_channel(self.bot, self.log_channel_id, "WARN",
                 "General notice failed", error=repr(e), tag=tag)
 
-# ----- commands -----
+    # ----- commands -----
+
     @commands.command(name="welcome")
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def welcome(self, ctx: commands.Context, clantag: str, *args):
@@ -245,7 +281,7 @@ class Welcome(commands.Cog):
                 "Permission denied", user=f"@{ctx.author.display_name}", tag=clantag.upper())
             return await ctx.reply("You're not allowed to use `!welcome`.")
 
-# Resolve target member: explicit mention or reply target
+        # resolve target member: explicit mention or reply target
         target_member = ctx.message.mentions[0] if ctx.message.mentions else None
         if (not target_member) and getattr(ctx.message, "reference", None):
             ref = ctx.message.reference
@@ -258,10 +294,9 @@ class Welcome(commands.Cog):
         tag = clantag.upper()
         eff = self._effective_row(tag)
         if not eff:
-# Cannot resolve channel; log and abort; no general message
             await log_to_channel(self.bot, self.log_channel_id, "ERROR",
-                "Failed to post", tag=tag, cause="no clan row or inactive and no C1C text", action="skipped general notice")
-            return await ctx.reply(f"I can't find an active welcome for **{tag}**. Ask an admin to add/activate it in the sheet.")
+                "Failed to post", tag=tag, cause="no clan row", action="skipped general notice")
+            return await ctx.reply(f"I can't find a configured welcome for **{tag}**. Add it in the sheet.")
 
         chan_id = eff.get("TARGET_CHANNEL_ID", "")
         if not chan_id.isdigit():
@@ -269,14 +304,26 @@ class Welcome(commands.Cog):
                 "Failed to post", tag=tag, cause="missing/invalid TARGET_CHANNEL_ID", action="skipped general notice")
             return await ctx.reply(f"No target channel configured for **{tag}**.")
 
-# Build embed
-        title = self._expand_all(eff.get("TITLE", ""), ctx.guild, tag, ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
-        body  = self._expand_all(eff.get("BODY", ""),  ctx.guild, tag, ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
-        foot  = self._expand_all(eff.get("FOOTER", ""), ctx.guild, tag, ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
-        
-        embed = discord.Embed(title=title, description=body, color=discord.Color.blue())
+        # Build expanded parts (with per-field C1C fallback already merged)
+        clan_name = (eff.get("CLAN", "") or "").strip() or tag
+
+        title = self._expand_all(eff.get("TITLE", ""), ctx.guild, tag, clan_name,
+                                 ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
+        body  = self._expand_all(eff.get("BODY", ""),  ctx.guild, tag, clan_name,
+                                 ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
+        foot  = self._expand_all(eff.get("FOOTER", ""), ctx.guild, tag, clan_name,
+                                 ctx.author, target_member, eff.get("CLANLEAD",""), eff.get("DEPUTIES",""))
+
+        # Guard: BODY must exist (Discord requires description)
+        if not (body or "").strip():
+            await log_to_channel(self.bot, self.log_channel_id, "ERROR",
+                "Effective BODY empty even after fallback", tag=tag)
+            return await ctx.reply("Missing welcome text. Please check the **C1C** row in the sheet.")
+
+        embed = discord.Embed(title=title or None, description=body, color=discord.Color.blue())
         embed.timestamp = datetime.now(timezone.utc)
-        
+
+        # footer with C1C emoji icon
         if foot:
             icon_url = None
             if self.c1c_footer_emoji_id:
@@ -286,12 +333,23 @@ class Welcome(commands.Cog):
             else:
                 embed.set_footer(text=foot)
 
-# Resolve clan channel
-        channel = ctx.guild.get_channel(int(chan_id)) or await self.bot.fetch_channel(int(chan_id))
-# Ping content for clan embed only if template says so
-        content_ping = target_member.mention if (target_member and eff.get("PING_USER")) else ""
+        # crest as thumbnail (optional)
+        crest = eff.get("CREST_URL", "")
+        if crest:
+            try:
+                embed.set_thumbnail(url=crest)
+            except Exception:
+                await log_to_channel(self.bot, self.log_channel_id, "WARN", "Crest load failed", tag=tag)
 
-# Send clan embed
+        # resolve clan channel & send embed
+        try:
+            channel = ctx.guild.get_channel(int(chan_id)) or await self.bot.fetch_channel(int(chan_id))
+        except Exception as e:
+            await log_to_channel(self.bot, self.log_channel_id, "ERROR",
+                "Failed to post", tag=tag, cause="cannot access clan channel", channel=chan_id, action="skipped general notice")
+            return await ctx.reply("Couldn't access the clan channel.")
+
+        content_ping = target_member.mention if (target_member and eff.get("PING_USER")) else ""
         try:
             await channel.send(content=content_ping, embed=embed)
         except Exception as e:
@@ -299,13 +357,13 @@ class Welcome(commands.Cog):
                 "Discord send failed", tag=tag, channel=chan_id, error=repr(e), action="skipped general notice")
             return await ctx.reply("Couldn't post the welcome in the clan channel.")
 
-# Send general notice (always pings; text from C1C.GENERAL_NOTICE or default)
+        # general notice (C1C.GENERAL_NOTICE or default copy)
         gen_text = (self.default_row.get("GENERAL_NOTICE", "") if self.default_row else "") or \
                    ("A new flame joins the cult — welcome {MENTION} to {CLAN}!\n"
                     "Be loud, be nerdy, and maybe even helpful. You know the drill, C1C.")
-        await self._send_general_notice(ctx.guild, gen_text, target_member, tag)
+        await self._send_general_notice(ctx.guild, gen_text, target_member, tag, clan_name)
 
-# Cleanup: delete invoking command
+        # cleanup the invoking command to keep chats tidy
         try:
             await asyncio.sleep(2)
             await ctx.message.delete()
