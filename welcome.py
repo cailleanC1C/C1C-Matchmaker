@@ -104,6 +104,7 @@ def _strip_empty_role_lines(text: str) -> str:
     """
     Remove 'Clan Lead:' / 'Deputies:' lines when the value is empty or a placeholder.
     Empty set includes: '', '-', '—', 'n/a', 'none', 'not found' (case-insensitive).
+    Also strips lines where nothing follows the colon.
     """
     def emptish(val: str) -> bool:
         v = (val or "").strip().lower()
@@ -125,7 +126,6 @@ def _strip_empty_role_lines(text: str) -> str:
         out.append(ln)
 
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
-
 
 # ---------------- Row fallback merge ----------------
 
