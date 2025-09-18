@@ -61,6 +61,7 @@ def _mark_event() -> None:
     _LAST_EVENT_TS = _now()
 
 # ------------------- ENV -------------------
+C1C_FOOTER_EMOJI_ID = int(os.getenv("C1C_FOOTER_EMOJI_ID", "0")) or None
 CREDS_JSON = os.environ.get("GSPREAD_CREDENTIALS")
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "bot_info")
@@ -183,13 +184,13 @@ async def build_tag_thumbnail(guild: discord.Guild | None, tag: str | None, *, s
     buf = io.BytesIO(raw)
     img = Image.open(buf).convert("RGBA")
 
-    # Trim transparent borders
+# Trim transparent borders
     alpha = img.split()[-1]
     bbox = alpha.getbbox()
     if bbox:
         img = img.crop(bbox)
 
-    # Scale into square canvas
+# Scale into square canvas
     w, h = img.size
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     target = int(size * max(0.2, min(0.95, box)))
@@ -253,10 +254,10 @@ STYLE_CANON = {
 def _canon_style(s: str) -> str | None:
     s = (s or "").strip().upper()
     s = re.sub(r"\s+", " ", s.replace("-", " "))
-    # try exact canonical first
+# try exact canonical first
     if s in STYLE_CANON:
         return STYLE_CANON[s]
-    # fall back to a few common forms
+# fall back to a few common forms
     if s == "SEMI COMPETITIVE":
         return "SEMICOMPETITIVE"
     if s == "STRESS FREE":
@@ -264,7 +265,7 @@ def _canon_style(s: str) -> str | None:
     return s if s in {"STRESSFREE", "CASUAL", "SEMICOMPETITIVE", "COMPETITIVE"} else None
 
 def _split_styles(cell_text: str) -> set[str]:
-    # split on common delimiters and canonicalize each token
+# split on common delimiters and canonicalize each token
     parts = re.split(r"[,\|/;]+", cell_text or "")
     out = set()
     for p in parts:
@@ -415,7 +416,7 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
 
     e = discord.Embed(title=title, description="\n\n".join(sections))
 
-    # Classic recruiter view: skip tag thumbnails to save space
+# Classic recruiter view: skip tag thumbnails to save space
     if SHOW_TAG_IN_CLASSIC:
         thumb = padded_emoji_url(guild, tag)
         if thumb:
@@ -443,7 +444,7 @@ def make_embed_for_row_search(row, filters_text: str, guild: discord.Guild | Non
     aa = (row[IDX_AA] or "").strip()
     ab = (row[IDX_AB] or "").strip()
 
-    # Title: no Inactives/Reserved in member view
+# Title: no Inactives/Reserved in member view
     title = f"{b} | {c} | **Level** {d} | **Spots:** {e_spots}"
 
     lines = ["**Entry Criteria:**"]
@@ -533,7 +534,7 @@ def _locate_summary_headers(rows):
                 lower.index("inactives"),
                 lower.index("reserved spots"),
             )
-    # fallback to the screenshot layout (F,G,H)
+# fallback to the screenshot layout (F,G,H)
     return (None, 5, 6, 7)
 
 def _first_nonempty_cell_lower(row):
@@ -606,7 +607,7 @@ def _parse_refresh_times(env_str: str) -> list[tuple[int, int]]:
             times.append((h, m))
         except Exception:
             pass
-    # dedupe + sort; default if nothing valid
+# dedupe + sort; default if nothing valid
     return sorted(set(times)) or [(2, 0), (10, 0), (18, 0)]
 
 async def _sleep_until(dt: datetime):
@@ -629,7 +630,7 @@ async def sheets_refresh_scheduler():
 
     while True:
         now = datetime.now(tz)
-        # next scheduled time today (or roll to tomorrow)
+# next scheduled time today (or roll to tomorrow)
         future_today = [now.replace(hour=h, minute=m, second=0, microsecond=0) for h, m in times if
                         now.replace(hour=h, minute=m, second=0, microsecond=0) > now]
         if future_today:
@@ -640,7 +641,7 @@ async def sheets_refresh_scheduler():
 
         await _sleep_until(next_dt)
 
-        # refresh: clear cache, warm it, optional log message
+# refresh: clear cache, warm it, optional log message
         try:
             clear_cache()
             _ = get_rows(True)  # warm cache immediately
@@ -811,7 +812,7 @@ class PagedResultsView(discord.ui.View):
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="pm_close")
     async def close_btn(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        # Try to delete the results message entirely.
+# Try to delete the results message entirely.
         try:
             # Prefer the interaction message; fall back to stored refs.
             target = getattr(itx, "message", None) or self.message or self.results_message
@@ -822,7 +823,7 @@ class PagedResultsView(discord.ui.View):
             # If deletion fails (e.g., perms), fall back to disabling the view.
             pass
     
-        # Fallback: disable buttons and mark as closed (no delete)
+# Fallback: disable buttons and mark as closed (no delete)
         for child in self.children:
             child.disabled = True
         embeds = _page_embeds(self.rows, self.page, self.builder, self.filters_text, self.guild)
@@ -921,7 +922,7 @@ class MemberSearchPagedView(discord.ui.View):
         return embeds, files
 
     async def _edit(self, itx: discord.Interaction):
-        # Acknowledge the interaction so we can use followups safely.
+# Acknowledge the interaction so we can use followups safely.
         try:
             await itx.response.defer()  # no visible message yet
         except InteractionResponded:
@@ -930,7 +931,7 @@ class MemberSearchPagedView(discord.ui.View):
         self._sync_buttons()
         embeds, files = await self._build_page()
 
-        # Send a fresh message so the new attachments are present; then remove the old one.
+# Send a fresh message so the new attachments are present; then remove the old one.
         sent = await itx.followup.send(embeds=embeds, files=files, view=self)
 
         if self.message:
@@ -941,7 +942,7 @@ class MemberSearchPagedView(discord.ui.View):
         self.message = sent
 
 
-    # --- View mode buttons (row 0) ---
+# --- View mode buttons (row 0) ---
     @discord.ui.button(emoji="📇", label="Short view", style=discord.ButtonStyle.primary, row=0, custom_id="ms_lite")
     async def ms_lite(self, itx: discord.Interaction, _btn: discord.ui.Button):
         self.mode = "lite"
@@ -957,7 +958,7 @@ class MemberSearchPagedView(discord.ui.View):
         self.mode = "profile"
         await self._edit(itx)
 
-    # --- Pager buttons (row 1) ---
+# --- Pager buttons (row 1) ---
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1, custom_id="ms_prev")
     async def prev(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if self.page > 0:
@@ -1036,7 +1037,7 @@ class SearchResultFlipView(discord.ui.View):
         return make_embed_for_row_lite(self.row, self.filters_text, self.guild)
 
     def _sync_buttons(self):
-        # Primary style marks the currently selected detailed view
+# Primary style marks the currently selected detailed view
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 if child.custom_id == "sr_profile":
@@ -1054,7 +1055,7 @@ class SearchResultFlipView(discord.ui.View):
         self._sync_buttons()
         embed = self._build_embed()
 
-        # Edit the message that contains these buttons — in place, no new messages
+# Edit the message that contains these buttons — in place, no new messages
         try:
             await itx.message.edit(embed=embed, view=self)
         except Exception:
@@ -1130,7 +1131,7 @@ def _is_admin_perm(member: discord.Member) -> bool:
     return bool(getattr(member, "guild_permissions", None) and member.guild_permissions.administrator)
 
 def _allowed_recruiter(member: discord.Member) -> bool:
-    # EXACT spec: recruiters (scout/coordinator IDs) OR admins (perm or ADMIN_ROLE_IDS)
+# EXACT spec: recruiters (scout/coordinator IDs) OR admins (perm or ADMIN_ROLE_IDS)
     return (
         _has_role_id(member, RECRUITER_ROLE_IDS)
         or _is_admin_perm(member)
@@ -1138,15 +1139,14 @@ def _allowed_recruiter(member: discord.Member) -> bool:
     )
 
 def _allowed_admin_or_lead(member: discord.Member) -> bool:
-    # Admin/lead spec for health/reload/ping
+# Admin/lead spec for health/reload/ping
     return (
         _is_admin_perm(member)
         or _has_role_id(member, ADMIN_ROLE_IDS)
         or _has_role_id(member, LEAD_ROLE_IDS)
     )
-# ----------------------------------------------------------------------------------
-
-bot.remove_command("help")  # we'll provide our own embed help
+# ---------------------- remove standard help so we have no doubles ------------------------------
+bot.remove_command("help")  
 
 LAST_CALL = defaultdict(float)
 ACTIVE_PANELS: dict[tuple[int,str], int] = {}  # (user_id, variant) -> message_id
@@ -1231,7 +1231,7 @@ class ClanMatchView(discord.ui.View):
         if not self.results_message:
             return
 
-        # Re-run the same filter logic to rebuild the results
+# Re-run the same filter logic to rebuild the results
         try:
             rows = get_rows(False)
         except Exception:
@@ -1255,7 +1255,7 @@ class ClanMatchView(discord.ui.View):
             except Exception:
                 continue
 
-        # No matches → clear the embeds on the existing results message
+# No matches → clear the embeds on the existing results message
         if not matches:
             try:
                 await self.results_message.edit(
@@ -1284,7 +1284,7 @@ class ClanMatchView(discord.ui.View):
                 self.results_message = sent
             return
 
-        # Paginated mode
+# Paginated mode
         view = PagedResultsView(
             author_id=itx.user.id,
             rows=matches,
@@ -1317,7 +1317,7 @@ class ClanMatchView(discord.ui.View):
             return False
         return True
 
-    # Row 0–3: selects
+# Row 0–3: selects
     @discord.ui.select(placeholder="CB Difficulty (optional)", min_values=0, max_values=1, row=0,
                        options=[discord.SelectOption(label=o, value=o) for o in CB_CHOICES])
     async def cb_select(self, itx: discord.Interaction, select: discord.ui.Select):
@@ -1358,7 +1358,7 @@ class ClanMatchView(discord.ui.View):
             await itx.followup.edit_message(message_id=itx.message.id, view=self)
         await self._maybe_refresh(itx)
 
-    # Row 4: buttons
+# Row 4: buttons
     def _cycle(self, current):
         return "1" if current is None else ("0" if current == "1" else None)
     def _toggle_label(self, name, value):
@@ -1421,13 +1421,13 @@ class ClanMatchView(discord.ui.View):
             await itx.response.send_message("Pick at least **one** filter, then try again. 🙂", ephemeral=True)
             return
     
-        # Acknowledge the click so we can use followup messages
+# Acknowledge the click so we can use followup messages
         await itx.response.defer(thinking=True)
     
         try:
             rows = get_rows(False)
     
-            # Build matches
+# Build matches
             matches = []
             for row in rows[1:]:
                 try:
@@ -1453,7 +1453,7 @@ class ClanMatchView(discord.ui.View):
                 )
                 return
     
-            # Soft-cap the number of results we show
+# Soft-cap the number of results we show
             total_found = len(matches)
             cap = max(1, SEARCH_RESULTS_SOFT_CAP)
             cap_note = None
@@ -1468,7 +1468,7 @@ class ClanMatchView(discord.ui.View):
             if cap_note:
                 filters_text = f"{filters_text} • {cap_note}" if filters_text else cap_note
     
-            # ----- MEMBER "SEARCH" VARIANT (attachments) -----
+# ----- MEMBER "SEARCH" VARIANT (attachments) -----
             if self.embed_variant == "search":
                 view = MemberSearchPagedView(
                     author_id=itx.user.id,
@@ -1508,7 +1508,7 @@ class ClanMatchView(discord.ui.View):
                 self.results_message = sent
                 return
     
-            # ----- RECRUITER "CLASSIC" VARIANT (unchanged display; no attachments) -----
+# ----- RECRUITER "CLASSIC" VARIANT (unchanged display; no attachments) -----
             builder = make_embed_for_row_classic
             total = len(matches)
     
@@ -1527,7 +1527,7 @@ class ClanMatchView(discord.ui.View):
                     self.results_message = sent
                 return
     
-            # Paged (classic)
+# Paged (classic)
             view = PagedResultsView(
                 author_id=itx.user.id,
                 rows=matches,
@@ -1597,16 +1597,25 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
             "`!ping`\n"
             "Admin/Recruitment Lead only. Quick bot-alive check."
         ),
+        "welcome": (
+            "`!welcome <CLANTAG> [@user]`\n"
+            "Posts a welcome message in the clan’s channel and a short message in General.\n"
+            "Also available:\n"
+            "`!welcome-refresh` — reload templates from the sheet\n"
+            "`!welcome-on` / `!welcome-off` — toggle the module\n"
+            "`!welcome-status` — show current state\n"
+            "\n"
+            "Examples: `!welcome C1CM @user`, `!welcome f-it`"
+        ),
     }
 
-    # --- overview help ---
+# --- overview help ---
     if not topic:
         e = discord.Embed(
             title="C1C-Matchmaker — Help",
             description=(
-                "Helps recruiters place new players into the right clan, and lets members "
-                "browse open spots and entry criteria.\n\n"
-                "Use `!help <command>` for detailed help (e.g., `!help clanmatch`)."
+                "Helps recruiters place new players into the right clan, lets members browse open spots, "
+                "and handles onboarding welcomes.\n\n"
             ),
             color=discord.Color.blurple()
         )
@@ -1629,14 +1638,19 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
             inline=False
         )
         e.add_field(
-            name="Admin / Maintenance",
-            value="`!reload`, `!health`, `!ping`",
+            name="Onboarding & Welcomes",
+            value="`!welcome`",
             inline=False
         )
-        e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
+        e.add_field(
+            name="Admin / Maintenance",
+            value="`!reload`, `!health`, `!ping`, `!welcome-refresh`, `!welcome-on`, `!welcome-off`, `!welcome-status`",
+            inline=False
+        )
+        e.set_footer(text="Note: Use `!help <command>` for detailed help (e.g., `!help clanmatch`, `!help welcome`).")
         return await ctx.reply(embed=e, mention_author=False)
 
-    # --- specific help page ---
+# --- specific help page ---
     txt = pages.get(topic)
     if not txt:
         log.warning("Unknown help topic requested: %s", topic)
@@ -1644,6 +1658,7 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
 
     e = discord.Embed(title=f"!help {topic}", description=txt, color=discord.Color.blurple())
     return await ctx.reply(embed=e, mention_author=False)
+
 
 
 # ------------------- Commands: panels -------------------
@@ -1659,13 +1674,13 @@ async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc
     If PANEL_THREAD_MODE=fixed and PANEL_FIXED_THREAD_ID is valid, use that thread.
     In fixed mode, never fall back to the invoking channel.
     """
-    # SAME mode → always the invoking channel
+# SAME mode → always the invoking channel
     if PANEL_THREAD_MODE != "fixed" or not PANEL_FIXED_THREAD_ID:
         return ctx.channel
 
     try:
         dest = bot.get_channel(PANEL_FIXED_THREAD_ID) or await bot.fetch_channel(PANEL_FIXED_THREAD_ID)
-        # Must be a thread in FIXED mode
+# Must be a thread in FIXED mode
         if isinstance(dest, discord.Thread):
             if dest.archived:
                 try:
@@ -1676,7 +1691,7 @@ async def _resolve_recruiter_panel_channel(ctx: commands.Context) -> discord.abc
                 except Exception:
                     pass  # best effort if we can't unarchive/extend
             return dest
-        # Not a thread → treat as error in FIXED mode (no fallback)
+# Not a thread → treat as error in FIXED mode (no fallback)
         print(f"[panel-thread] FIXED mode id {PANEL_FIXED_THREAD_ID} is not a thread; refusing to fallback.", flush=True)
         return None
     except Exception as e:
@@ -1735,7 +1750,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
             view.message = msg
             await msg.edit(embed=embed, view=view)
     
-            # Optional pointer (no auto-delete)
+# Optional pointer (no auto-delete)
             if target_chan != ctx.channel:
                 try:
                     await ctx.reply(
@@ -1751,7 +1766,7 @@ async def clanmatch_cmd(ctx: commands.Context, *, extra: str | None = None):
         except Exception:
             pass
 
-    # New panel: ping the opener in the thread and drop a pointer in the invoking channel
+# New panel: ping the opener in the thread and drop a pointer in the invoking channel
     sent = await target_chan.send(
         content=(ctx.author.mention if target_chan != ctx.channel else None),
         embed=embed,
@@ -1784,7 +1799,7 @@ async def mmhealth(ctx):
 @commands.cooldown(1, 2, commands.BucketType.user)
 @bot.command(name="clansearch")
 async def clansearch_cmd(ctx: commands.Context, *, extra: str | None = None):
-    # Guard: this command takes no arguments
+# Guard: this command takes no arguments
     if extra and extra.strip():
         msg = (
             "❌ `!clansearch` doesn’t take a clan tag or name.\n"
@@ -1851,7 +1866,7 @@ def find_clan_row(query: str):
     return exact_tag or exact_name or (partials[0] if partials else None)
 
 def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.Embed:
-    # Top line with rank fallback
+# Top line with rank fallback
     rank_raw = (row[COL_A_RANK] or "").strip()
     rank = rank_raw if rank_raw and rank_raw not in {"-", "—"} else ">1k"
 
@@ -1859,22 +1874,22 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
     tag   = (row[COL_C_TAG]         or "").strip()
     lvl   = (row[COL_D_LEVEL]       or "").strip()
 
-    # Leadership
+# Leadership
     lead  = (row[COL_G_LEAD]        or "").strip()
     deps  = (row[COL_H_DEPUTIES]    or "").strip()
 
-    # Ranges
+# Ranges
     cb    = (row[COL_M_CB]          or "").strip()
     hydra = (row[COL_N_HYDRA]       or "").strip()
     chim  = (row[COL_O_CHIMERA]     or "").strip()
 
-    # CvC / Siege
+# CvC / Siege
     cvc_t = (row[COL_I_CVC_TIER]    or "").strip()
     cvc_w = (row[COL_J_CVC_WINS]    or "").strip()
     sg_t  = (row[COL_K_SIEGE_TIER]  or "").strip()
     sg_w  = (row[COL_L_SIEGE_WINS]  or "").strip()
 
-    # Footer
+# Footer
     prog  = (row[COL_F_PROGRESSION] or "").strip()
     style = (row[COL_U_STYLE]       or "").strip()
 
@@ -1906,7 +1921,7 @@ def make_embed_for_profile(row, guild: discord.Guild | None = None) -> discord.E
         if em:
             e.set_thumbnail(url=str(em.url))
 
-    # Add hint so 💡 can flip to Entry Criteria
+# Add hint so 💡 can flip to Entry Criteria
     e.set_footer(text="React with 💡 for Entry Criteria")
     return e
 
@@ -1922,20 +1937,20 @@ async def clanprofile_cmd(ctx: commands.Context, *, query: str | None = None):
             await ctx.reply(f"Couldn’t find a clan matching **{query}**.", mention_author=False)
             return
 
-        # Build the profile embed as before
+# Build the profile embed as before
         embed = make_embed_for_profile(row, ctx.guild)
 
-        # NEW: build attachment for top-right clan tag and send with files=[...]
+# NEW: build attachment for top-right clan tag and send with files=[...]
         tag = (row[COL_C_TAG] or "").strip()
         file, url = await build_tag_thumbnail(ctx.guild, tag, size=TAG_BADGE_PX, box=TAG_BADGE_BOX)
         if url:
             embed.set_thumbnail(url=url)
             msg = await ctx.reply(embed=embed, files=[file], mention_author=False)
         else:
-            # Fallback: send without thumbnail if we couldn't build one
+# Fallback: send without thumbnail if we couldn't build one
             msg = await ctx.reply(embed=embed, mention_author=False)
 
-        # Keep the 💡 flip and index registration exactly as before
+# Keep the 💡 flip and index registration exactly as before
         try:
             await msg.add_reaction("💡")
         except Exception:
@@ -2003,7 +2018,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             info["kind"] = "entry_from_profile"           # flip back
             REACT_INDEX[payload.message_id] = info
 
-        # Let users press 💡 again without removing it manually
+# Let users press 💡 again without removing it manually
         try:
             user = payload.member or (guild and guild.get_member(payload.user_id))
             if user:
@@ -2060,7 +2075,7 @@ async def health_prefix(ctx: commands.Context):
 
 @bot.command(name="reload")
 async def reload_cache_cmd(ctx):
-    # Admin or Recruitment Lead only
+# Admin or Recruitment Lead only
     if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
         await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!reload`.", mention_author=False)
         return
@@ -2078,7 +2093,7 @@ async def _purge_one_target(channel: discord.abc.Messageable, cutoff_dt: datetim
     if not getattr(bot, "user", None):
         return 0
 
-    # If it's a thread and archived, try to unarchive temporarily so we can purge.
+# If it's a thread and archived, try to unarchive temporarily so we can purge.
     if isinstance(channel, discord.Thread) and channel.archived:
         try:
             await channel.edit(archived=False, auto_archive_duration=min(max(PANEL_THREAD_ARCHIVE_MIN, 60), 10080))
@@ -2095,13 +2110,13 @@ async def _purge_one_target(channel: discord.abc.Messageable, cutoff_dt: datetim
         except Exception:
             return False
 
-    # Purge up to 1000 recent messages per target (more than enough for daily spam).
-    # Note: bulk delete only works for <14 days old; our default is 24h so it's fine.
+# Purge up to 1000 recent messages per target (more than enough for daily spam).
+# Note: bulk delete only works for <14 days old; our default is 24h so it's fine.
     try:
         deleted = await channel.purge(limit=1000, check=_check, bulk=True, oldest_first=False)
         return len(deleted)
     except Exception:
-        # Fallback: manual pass if purge fails (permissions/rate limits, etc.)
+# Fallback: manual pass if purge fails (permissions/rate limits, etc.)
         count = 0
         try:
             async for m in channel.history(limit=1000, oldest_first=False):
@@ -2143,18 +2158,18 @@ async def on_socket_response(payload):
 
 @bot.event
 async def on_connect():
-    # ADD these two lines if you already have on_connect()
+# ADD these two lines if you already have on_connect()
     global BOT_CONNECTED
     BOT_CONNECTED = True
     _mark_event()
 
 @bot.event
 async def on_resumed():
-    # ADD this event; or merge into existing if present
+# ADD this event; or merge into existing if present
     global BOT_CONNECTED
     BOT_CONNECTED = True
     _mark_event()
-    # optional: log.info("Gateway resumed")
+# optional: log.info("Gateway resumed")
 
 @bot.event
 async def on_ready():
@@ -2162,7 +2177,7 @@ async def on_ready():
     BOT_CONNECTED = True
     _LAST_READY_TS = _now()  
     _mark_event()
-    # start watchdog once
+# start watchdog once
     try:
         if not _watchdog.is_running():    
             _watchdog.start()             
@@ -2175,22 +2190,22 @@ async def on_ready():
     except Exception as e:
         print(f"[slash] sync failed: {e}", flush=True)
 
-    # kick off the daily poster (safe to call repeatedly)
+# kick off the daily poster (safe to call repeatedly)
     if not daily_recruiters_update.is_running():
         daily_recruiters_update.start()
         
-    # Start scheduled cleanup
+# Start scheduled cleanup
     if not scheduled_cleanup.is_running():
         scheduled_cleanup.start()
         
-    # Start the watchdog loop (exits the process if Discord stays disconnected)
+# Start the watchdog loop (exits the process if Discord stays disconnected)
     try:
         if not _watchdog.is_running():
             _watchdog.start()
     except NameError:
         pass
 
-    # Start the Sheets refresh scheduler (3x/day via REFRESH_TIMES)
+# Start the Sheets refresh scheduler (3x/day via REFRESH_TIMES)
     global _SHEETS_REFRESH_TASK
     if _SHEETS_REFRESH_TASK is None or _SHEETS_REFRESH_TASK.done():
         _SHEETS_REFRESH_TASK = bot.loop.create_task(sheets_refresh_scheduler())
@@ -2220,7 +2235,7 @@ async def _maybe_restart(reason: str):
 async def _watchdog():
     now = _now()
 
-    # If connected, check for zombie state (no events for a long while + bad latency)
+# If connected, check for zombie state (no events for a long while + bad latency)
     if BOT_CONNECTED:
         idle_for = (now - _LAST_EVENT_TS) if _LAST_EVENT_TS else 0
         try:
@@ -2228,12 +2243,12 @@ async def _watchdog():
         except Exception:
             latency = None
 
-        # 10 min without any events is suspicious; adjust to your traffic level.
+# 10 min without any events is suspicious; adjust to your traffic level.
         if _LAST_EVENT_TS and idle_for > 600 and (latency is None or latency > 10):
             await _maybe_restart(f"zombie: no events for {int(idle_for)}s, latency={latency}")
         return
 
-    # Disconnected: measure real outage time from the last disconnect moment
+# Disconnected: measure real outage time from the last disconnect moment
     global _LAST_DISCONNECT_TS
     if not _LAST_DISCONNECT_TS:
         # first time we noticed the disconnect — start the timer
@@ -2252,7 +2267,7 @@ def _last_event_age_s() -> int | None:
     return int(_now() - _LAST_EVENT_TS) if _LAST_EVENT_TS else None
 
 async def _health_json(_req):
-    # 200 when connected; 503 when disconnected; 206 “partial” if zombie hint
+# 200 when connected; 503 when disconnected; 206 “partial” if zombie hint
     connected = BOT_CONNECTED
     age = _last_event_age_s()
     latency = None
@@ -2278,7 +2293,7 @@ async def _health_json(_req):
     return web.json_response(body, status=status)
 
 async def _health_json_ok_always(_req):
-    # Same payload as _health_json, but always HTTP 200 to avoid host flaps.
+# Same payload as _health_json, but always HTTP 200 to avoid host flaps.
     connected = BOT_CONNECTED
     age = _last_event_age_s()
     try:
@@ -2305,7 +2320,7 @@ async def emoji_pad_handler(request: web.Request):
     """
     src = request.query.get("u")
 
-    # Clamp inputs to prevent abuse / CPU spikes
+# Clamp inputs to prevent abuse / CPU spikes
     s_raw = request.query.get("s")
     try:
         size = int(s_raw) if s_raw is not None else EMOJI_PAD_SIZE
@@ -2323,7 +2338,7 @@ async def emoji_pad_handler(request: web.Request):
     if not src:
         return web.Response(status=400, text="missing u")
 
-    # ---- URL validation (SSRF protection)
+# ---- URL validation (SSRF protection)
     try:
         parsed = urlparse(src)
     except Exception:
@@ -2362,13 +2377,13 @@ async def emoji_pad_handler(request: web.Request):
                     return web.Response(status=413, text="image too large")
             raw = bytes(buf)
 
-        # ---- Image processing
+# ---- Image processing
         try:
             img = Image.open(io.BytesIO(raw))
         except Exception as e:
             return web.Response(status=415, text=f"cannot parse image: {type(e).__name__}")
 
-        # Convert to RGBA (handles PNG/WEBP/GIF first frame, etc.)
+# Convert to RGBA (handles PNG/WEBP/GIF first frame, etc.)
         try:
             img = img.convert("RGBA")
         except Exception:
@@ -2376,13 +2391,13 @@ async def emoji_pad_handler(request: web.Request):
             img.load()
             img = img.convert("RGBA")
 
-        # Trim transparent borders so glyph is truly centered
+# Trim transparent borders so glyph is truly centered
         alpha = img.split()[-1]
         bbox = alpha.getbbox()
         if bbox:
             img = img.crop(bbox)
 
-        # Scale glyph to fit target “box” inside the square canvas
+# Scale glyph to fit target “box” inside the square canvas
         w, h = img.size
         max_side = max(w, h) or 1
         target   = max(1, int(size * box))
@@ -2404,7 +2419,7 @@ async def emoji_pad_handler(request: web.Request):
             content_type="image/png",
         )
 
-    # Network / PIL fallbacks
+# Network / PIL fallbacks
     except asyncio.TimeoutError:
         return web.Response(status=504, text="image fetch timeout")
     except Exception as e:
@@ -2417,9 +2432,9 @@ async def start_webserver():
         await app["session"].close()
     app.on_cleanup.append(_close_session)
 
-    # Platform-safe defaults:
-    # - When STRICT_PROBE=0 (default): `/`, `/ready`, `/health` always 200
-    # - When STRICT_PROBE=1: platform probes use deep status (200/206/503)
+# Platform-safe defaults:
+# - When STRICT_PROBE=0 (default): `/`, `/ready`, `/health` always 200
+# - When STRICT_PROBE=1: platform probes use deep status (200/206/503)
     if STRICT_PROBE:
         app.router.add_get("/", _health_json)
         app.router.add_get("/ready", _health_json)
@@ -2429,10 +2444,10 @@ async def start_webserver():
         app.router.add_get("/ready", _health_json_ok_always)
         app.router.add_get("/health", _health_json_ok_always)
 
-    # Deep health endpoint for your monitoring/alerts (can return 206 on zombie-ish)
+# Deep health endpoint for your monitoring/alerts (can return 206 on zombie-ish)
     app.router.add_get("/healthz", _health_json)
 
-    # Existing emoji pad proxy
+# Existing emoji pad proxy
     app.router.add_get("/emoji-pad", emoji_pad_handler)
 
     runner = web.AppRunner(app)
@@ -2442,6 +2457,32 @@ async def start_webserver():
     await site.start()
     print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
 
+# ---------------Integration of welcome.py for welcome messages--------------------------
+import os
+from welcome import Welcome
+
+WELCOME_ALLOWED_ROLES = {int(x) for x in os.getenv("WELCOME_ALLOWED_ROLES","").split(",") if x.strip().isdigit()}
+WELCOME_GENERAL_CHANNEL_ID = int(os.getenv("WELCOME_GENERAL_CHANNEL_ID","0")) or None
+WELCOME_ENABLED = os.getenv("WELCOME_ENABLED","Y").upper() != "N"
+LOG_CHANNEL_ID = 1415330837968191629  # your shared log channel
+C1C_FOOTER_ICON_URL = os.getenv("C1C_FOOTER_ICON_URL","") or None  # put your blue flame/crest URL here
+
+def get_welcome_rows():
+    # return list[dict] from the "WelcomeTemplates" tab in your existing sheet
+    ws = SHEET.worksheet(os.getenv("WELCOME_SHEET_TAB","WelcomeTemplates"))
+    return ws.get_all_records()  # relies on your existing gspread client
+
+welcome_cog = Welcome(
+    bot,
+    get_rows=get_welcome_rows,
+    log_channel_id=LOG_CHANNEL_ID,
+    general_channel_id=WELCOME_GENERAL_CHANNEL_ID,
+    allowed_role_ids=WELCOME_ALLOWED_ROLES,
+    c1c_footer_emoji_id=C1C_FOOTER_EMOJI_ID,   # <-- pass emoji ID here
+    enabled_default=WELCOME_ENABLED,
+)
+bot.add_cog(welcome_cog)
+await welcome_cog.reload_templates()
 
 # ------------------- Boot both -------------------
 async def main():
@@ -2459,3 +2500,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
