@@ -2209,6 +2209,15 @@ async def on_ready():
     global _SHEETS_REFRESH_TASK
     if _SHEETS_REFRESH_TASK is None or _SHEETS_REFRESH_TASK.done():
         _SHEETS_REFRESH_TASK = bot.loop.create_task(sheets_refresh_scheduler())
+# Prime Welcome templates once
+    global _WELCOME_PRIMED
+    if not _WELCOME_PRIMED:
+        try:
+            await welcome_cog.reload_templates()
+            _WELCOME_PRIMED = True
+            print("[welcome] templates loaded", flush=True)
+        except Exception as e:
+            print(f"[welcome] initial template load failed: {type(e).__name__}: {e}", flush=True)
 
 @bot.event
 async def on_disconnect():
@@ -2457,15 +2466,14 @@ async def start_webserver():
     await site.start()
     print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
 
-# ---------------Integration of welcome.py for welcome messages--------------------------
-import os
-from welcome import Welcome
+# --------------- Integration of welcome.py for welcome messages --------------------------
+from welcome import Welcome  # if you moved it into a folder: from modules.welcome import Welcome
 
 WELCOME_ALLOWED_ROLES = {int(x) for x in os.getenv("WELCOME_ALLOWED_ROLES","").split(",") if x.strip().isdigit()}
 WELCOME_GENERAL_CHANNEL_ID = int(os.getenv("WELCOME_GENERAL_CHANNEL_ID","0")) or None
 WELCOME_ENABLED = os.getenv("WELCOME_ENABLED","Y").upper() != "N"
-LOG_CHANNEL_ID = 1415330837968191629  # your shared log channel
-C1C_FOOTER_ICON_URL = os.getenv("C1C_FOOTER_ICON_URL","") or None  # put your blue flame/crest URL here
+LOG_CHANNEL_ID = 1415330837968191629
+C1C_FOOTER_EMOJI_ID = int(os.getenv("C1C_FOOTER_EMOJI_ID","0")) or None
 
 def get_welcome_rows():
     """Return list[dict] from the WelcomeTemplates tab in the same spreadsheet."""
@@ -2482,16 +2490,13 @@ welcome_cog = Welcome(
     log_channel_id=LOG_CHANNEL_ID,
     general_channel_id=WELCOME_GENERAL_CHANNEL_ID,
     allowed_role_ids=WELCOME_ALLOWED_ROLES,
-    c1c_footer_emoji_id=C1C_FOOTER_EMOJI_ID,   # <-- pass emoji ID here
+    c1c_footer_emoji_id=C1C_FOOTER_EMOJI_ID,
     enabled_default=WELCOME_ENABLED,
 )
 bot.add_cog(welcome_cog)
-# Prime the Welcome templates (once, on first ready)
-try:
-    await welcome_cog.reload_templates()
-except Exception as e:
-    print(f"[welcome] initial template load failed: {type(e).__name__}: {e}", flush=True)
 
+# prime once in on_ready (can't await at module level)
+_WELCOME_PRIMED = False
 
 # ------------------- Boot both -------------------
 async def main():
@@ -2509,5 +2514,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
