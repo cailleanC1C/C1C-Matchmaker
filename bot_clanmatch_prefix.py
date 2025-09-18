@@ -2210,6 +2210,7 @@ async def on_ready():
     global _SHEETS_REFRESH_TASK
     if _SHEETS_REFRESH_TASK is None or _SHEETS_REFRESH_TASK.done():
         _SHEETS_REFRESH_TASK = bot.loop.create_task(sheets_refresh_scheduler())
+
 # Prime Welcome templates once
     global _WELCOME_PRIMED
     if not _WELCOME_PRIMED:
@@ -2219,6 +2220,18 @@ async def on_ready():
             print("[welcome] templates loaded", flush=True)
         except Exception as e:
             print(f"[welcome] initial template load failed: {type(e).__name__}: {e}", flush=True)
+
+# --- DEBUG: list loaded commands & confirm welcome registration ---
+    try:
+        names = sorted([c.name for c in bot.commands])
+        print("[debug] loaded prefix commands:", ", ".join(names), flush=True)
+        if "welcome" not in names:
+            print("[debug] WARNING: 'welcome' command not registered", flush=True)
+        else:
+            print("[debug] OK: 'welcome' command is registered", flush=True)
+    except Exception as e:
+        print(f"[debug] command list error: {type(e).__name__}: {e}", flush=True)
+
 
 @bot.event
 async def on_disconnect():
@@ -2468,7 +2481,7 @@ async def start_webserver():
     print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
 
 # --------------- Integration of welcome.py for welcome messages --------------------------
-from welcome import Welcome  # if you moved it into a folder: from modules.welcome import Welcome
+from welcome import Welcome  # or: from modules.welcome import Welcome
 
 WELCOME_ALLOWED_ROLES = {int(x) for x in os.getenv("WELCOME_ALLOWED_ROLES","").split(",") if x.strip().isdigit()}
 WELCOME_GENERAL_CHANNEL_ID = int(os.getenv("WELCOME_GENERAL_CHANNEL_ID","0")) or None
@@ -2494,9 +2507,9 @@ welcome_cog = Welcome(
     c1c_footer_emoji_id=C1C_FOOTER_EMOJI_ID,
     enabled_default=WELCOME_ENABLED,
 )
-bot.add_cog(welcome_cog)
 
-# prime once in on_ready (can't await at module level)
+# Flags to ensure we only add/prime once
+_WELCOME_ADDED = False
 _WELCOME_PRIMED = False
 
 # ------------------- Boot both -------------------
@@ -2515,8 +2528,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
