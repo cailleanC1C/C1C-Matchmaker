@@ -663,29 +663,29 @@ def build_recruiters_summary_embed(guild: discord.Guild | None = None) -> discor
     data = read_recruiter_summary()
 
     lines = []
-    lines.append("**General overview**")
+    lines.append("### General overview")
     for key_norm, pretty in [
-        ("overall", "overall"),
-        ("top10",   "Top10"),
-        ("top5",    "Top 5"),
+        ("overall", "🔹**overall**"),
+        ("top10",   "🔹**Top 10**"),
+        ("top5",    "🔹**Top 5**"),
     ]:
         o, ina, res = data.get(key_norm, (0, 0, 0))
         lines.append(f"{pretty}: open {o} | inactives {ina} | reserved {res}")
 
     lines.append("")
-    lines.append("**per Bracket**")
+    lines.append("### Per Bracket")
     for key_norm, pretty in [
-        ("elite end game", "Elite End Game"),
-        ("early end game", "Early End Game"),
-        ("late game",      "Late Game"),
-        ("mid game",       "Mid Game"),
-        ("early game",     "Early Game"),
-        ("beginners",      "Beginners"),
+        ("elite end game", "🔹**Elite End Game**"),
+        ("early end game", "🔹**Early End Game**"),
+        ("late game",      "🔹**Late Game**"),
+        ("mid game",       "🔹**Mid Game**"),
+        ("early game",     "🔹**Early Game**"),
+        ("beginners",      "🔹**Beginners**"),
     ]:
         o, ina, res = data.get(key_norm, (0, 0, 0))
         lines.append(f"{pretty}: open {o} | inactives {ina} | reserved {res}")
 
-    e = discord.Embed(title="Summary open spots", description="\n".join(lines))
+    e = discord.Embed(title="## Summary open spots", description="\n".join(lines))
 
     thumb = padded_emoji_url(guild, "C1C")
     if thumb:
@@ -710,7 +710,7 @@ async def daily_recruiters_update():
 
         embed = build_recruiters_summary_embed(getattr(thread, "guild", None))
 
-        parts = [f"Update {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"]
+        parts = [f"# Update {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"]
         if ROLE_ID_RECRUITMENT_COORDINATOR:
             parts.append(f"<@&{ROLE_ID_RECRUITMENT_COORDINATOR}>")
         if ROLE_ID_RECRUITMENT_SCOUT:
@@ -2536,4 +2536,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
