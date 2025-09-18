@@ -1,5 +1,6 @@
 # bot_clanmatch_prefix.py
-# C1C-Matchmaker — panels, search, profiles, emoji padding, and reaction flip (💡)
+# C1C-Matchmaker — v1.0
+# panels, search, profiles, emoji padding, and reaction flip (💡)
 
 import os, json, time, asyncio, re, traceback, urllib.parse, io, math
 from collections import defaultdict
@@ -2467,7 +2468,7 @@ async def start_webserver():
     print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
 
 # --------------- Integration of welcome.py for welcome messages --------------------------
-from welcome import welcome  # if you moved it into a folder: from modules.welcome import Welcome
+from welcome import Welcome  # if you moved it into a folder: from modules.welcome import Welcome
 
 WELCOME_ALLOWED_ROLES = {int(x) for x in os.getenv("WELCOME_ALLOWED_ROLES","").split(",") if x.strip().isdigit()}
 WELCOME_GENERAL_CHANNEL_ID = int(os.getenv("WELCOME_GENERAL_CHANNEL_ID","0")) or None
@@ -2514,6 +2515,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
