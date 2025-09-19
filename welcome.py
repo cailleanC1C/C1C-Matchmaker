@@ -103,29 +103,38 @@ def _expand_basic(
 def _strip_empty_role_lines(text: str) -> str:
     """
     Remove 'Clan Lead:' / 'Deputies:' lines when the value is empty or a placeholder.
+    Handles emoji bullets, bold/italics, non-breaking spaces, etc.
     Empty set includes: '', '-', '—', 'n/a', 'none', 'not found' (case-insensitive).
     Also strips lines where nothing follows the colon.
     """
     def emptish(val: str) -> bool:
-        v = (val or "").strip().lower()
+        v = (val or "").replace("\u00A0", " ").strip().lower()  # normalize NBSP
         return v in {"", "-", "—", "n/a", "na", "none", "notfound", "not found"}
 
-    lines = (text or "").splitlines()
     out = []
-    for ln in lines:
-        raw = ln.strip()
+    lines = (text or "").splitlines()
 
-        m = re.match(r"^(.*\bClan\s*Lead\b\s*:\s*)(.*)$", raw, flags=re.I)
-        if m and emptish(m.group(2)):
+    for ln in lines:
+        # work on a normalized copy, but keep original ln for output if we keep it
+        raw = ln.replace("\u00A0", " ").strip()
+
+        # Match '... Clan Lead : <value>' with optional markdown/emoji before/around label
+        m_lead = re.search(r"Clan\s*Lead\s*:\s*(.*)$", raw, flags=re.IGNORECASE)
+        if m_lead and emptish(m_lead.group(1)):
             continue
 
-        m = re.match(r"^(.*\bDeput(?:y|ies)\b\s*:\s*)(.*)$", raw, flags=re.I)
-        if m and emptish(m.group(2)):
+        # Match '... Deputies : <value>' (or singular Deputy)
+        m_deps = re.search(r"Deput(?:y|ies)\s*:\s*(.*)$", raw, flags=re.IGNORECASE)
+        if m_deps and emptish(m_deps.group(1)):
             continue
 
         out.append(ln)
 
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
+    # collapse any excessive blank lines left behind
+    cleaned = "\n".join(out)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip("\n")
+    return cleaned
+
 
 # ---------------- Row fallback merge ----------------
 
