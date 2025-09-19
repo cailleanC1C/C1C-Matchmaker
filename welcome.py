@@ -102,39 +102,63 @@ def _expand_basic(
 
 def _strip_empty_role_lines(text: str) -> str:
     """
-    Remove 'Clan Lead:' / 'Deputies:' lines when the value is empty or a placeholder.
-    Handles emoji bullets, bold/italics, non-breaking spaces, etc.
-    Empty set includes: '', '-', '—', 'n/a', 'none', 'not found' (case-insensitive).
-    Also strips lines where nothing follows the colon.
+    1) Remove 'Clan Lead:' / 'Deputies:' lines when value is empty or a placeholder.
+       Handles emoji bullets, bold/italics, NBSPs.
+    2) If that leaves a dangling 'Your … crew:' header, remove the header (and one trailing blank line).
     """
     def emptish(val: str) -> bool:
-        v = (val or "").replace("\u00A0", " ").strip().lower()  # normalize NBSP
+        v = (val or "").replace("\u00A0", " ").strip().lower()
         return v in {"", "-", "—", "n/a", "na", "none", "notfound", "not found"}
 
-    out = []
-    lines = (text or "").splitlines()
-
-    for ln in lines:
-        # work on a normalized copy, but keep original ln for output if we keep it
+    # --- pass 1: drop empty role lines ---
+    kept: list[str] = []
+    for ln in (text or "").splitlines():
         raw = ln.replace("\u00A0", " ").strip()
 
-        # Match '... Clan Lead : <value>' with optional markdown/emoji before/around label
         m_lead = re.search(r"Clan\s*Lead\s*:\s*(.*)$", raw, flags=re.IGNORECASE)
         if m_lead and emptish(m_lead.group(1)):
             continue
 
-        # Match '... Deputies : <value>' (or singular Deputy)
         m_deps = re.search(r"Deput(?:y|ies)\s*:\s*(.*)$", raw, flags=re.IGNORECASE)
         if m_deps and emptish(m_deps.group(1)):
             continue
 
-        out.append(ln)
+        kept.append(ln)
 
-    # collapse any excessive blank lines left behind
+    # --- pass 2: drop orphan 'Your … crew:' header if no role lines remain nearby ---
+    out: list[str] = []
+    i = 0
+    while i < len(kept):
+        raw = kept[i].replace("\u00A0", " ").strip()
+
+        # very forgiving match for the header line
+        if re.search(r"\byour\b.*\bcrew\s*:\s*$", raw, flags=re.IGNORECASE):
+            # look ahead a few lines for any surviving role line
+            has_roles = False
+            for j in range(i + 1, min(i + 6, len(kept))):
+                probe = kept[j].replace("\u00A0", " ").strip()
+                if re.search(r"Clan\s*Lead\s*:", probe, flags=re.IGNORECASE) or \
+                   re.search(r"Deput(?:y|ies)\s*:", probe, flags=re.IGNORECASE):
+                    has_roles = True
+                    break
+                # stop scanning if we hit a non-empty non-role paragraph
+                if probe and not probe.endswith(":"):
+                    # keep scanning a little, but don't go forever
+                    pass
+            if not has_roles:
+                # skip the header
+                i += 1
+                # also skip one immediate blank line if present
+                if i < len(kept) and not kept[i].strip():
+                    i += 1
+                continue
+
+        out.append(kept[i])
+        i += 1
+
     cleaned = "\n".join(out)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip("\n")
     return cleaned
-
 
 # ---------------- Row fallback merge ----------------
 
