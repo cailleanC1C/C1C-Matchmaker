@@ -102,12 +102,18 @@ def _expand_basic(
 
 def _strip_empty_role_lines(text: str) -> str:
     """
-    1) Remove 'Clan Lead:' / 'Deputies:' lines when value is empty/placeholder.
-    2) If that leaves an orphan 'Your … crew:' header (no role values), remove the header.
-    Robust to emojis, **markdown**, NBSPs, and colon variants.
+    1) Remove 'Clan Lead:' / 'Deputies:' lines when the value is empty/placeholder.
+       Works even if the label and colon are wrapped in markdown (**bold**, _italics_) or
+       preceded by emoji bullets. Accepts ASCII ':' and full-width '：'.
+    2) If both role lines are removed, also remove the nearby 'Your … crew:' header.
     """
     def norm(s: str) -> str:
+        # normalize NBSPs and trim
         return (s or "").replace("\u00A0", " ").strip()
+
+    def strip_md(s: str) -> str:
+        # remove light markdown that can sit around labels/colons
+        return re.sub(r"[`*_~]", "", s)
 
     def emptish(val: str) -> bool:
         v = norm(val).lower()
@@ -115,34 +121,34 @@ def _strip_empty_role_lines(text: str) -> str:
 
     lines = (text or "").splitlines()
 
-    # --- pass 1: drop empty role lines (handles ":" or "：")
+    # --- pass 1: drop empty role lines (detect on a "plain" copy with md stripped)
     kept = []
     role_kept_any = False
-    role_pattern = re.compile(r"(Clan\s*Lead|Deput(?:y|ies))\s*[:：]\s*(.*)$", re.IGNORECASE)
+    role_re = re.compile(r"(Clan\s*Lead|Deput(?:y|ies))\s*[:：]\s*(.*)$", re.IGNORECASE)
 
     for ln in lines:
         raw = norm(ln)
-        m = role_pattern.search(raw)
+        plain = strip_md(raw)
+        m = role_re.search(plain)
         if m:
-            # value is group(2)
-            if emptish(m.group(2)):
-                # drop the line entirely
+            tail = m.group(2)
+            if emptish(tail):
+                # whole line is just the label + empty value -> drop it
                 continue
-            else:
-                role_kept_any = True
+            role_kept_any = True
         kept.append(ln)
 
-    # --- pass 2: remove orphan "Your ... crew:" header if no role lines survived
+    # --- pass 2: if no role lines survived, remove the orphan "Your … crew:" header
     if not role_kept_any:
         out = []
         i = 0
         while i < len(kept):
             raw = norm(kept[i])
-            # very forgiving header match
-            if re.search(r"\byour\b.*\bcrew\s*[:：]\s*$", raw, re.IGNORECASE):
-                # skip this header
+            plain = strip_md(raw)
+            if re.search(r"\byour\b.*\bcrew\s*[:：]\s*$", plain, re.IGNORECASE):
+                # skip header
                 i += 1
-                # also skip a single immediate blank line (if present)
+                # and a single blank line after it, if present
                 if i < len(kept) and not norm(kept[i]):
                     i += 1
                 continue
@@ -150,7 +156,7 @@ def _strip_empty_role_lines(text: str) -> str:
             i += 1
         kept = out
 
-    # collapse excessive blanks
+    # collapse extra blank lines
     cleaned = "\n".join(kept)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip("\n")
     return cleaned
