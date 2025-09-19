@@ -1578,13 +1578,18 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
             "`!clansearch`\n"
             "Opens the member panel for browsing open clans.\n"
             "Pick filters and click **Search Clans**.\n"
-            "Each result shows a slim card; use the buttons to flip views."
+            "Each result shows a slim card. use the buttons to flip views."
         ),
         "clan": (
             "`!clan <tag or name>`\n"
             "Show a full clan profile (level, rank, leadership, CB/Hydra/Chimera ranges, "
             "CvC & Siege stats, progression, playstyle).\n"
             "💡 React with the bulb to flip to entry criteria."
+        ),
+        "welcome": (
+            "`!welcome <CLANTAG> [@user]`\n"
+            "Posts a welcome message in the clan’s channel and a short message in general chat.\n"
+            "Examples: `!welcome C1CM @user`, `!welcome f-it`"
         ),
         "reload": (
             "`!reload`\n"
@@ -1598,25 +1603,32 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
             "`!ping`\n"
             "Admin/Recruitment Lead only. Quick bot-alive check."
         ),
-        "welcome": (
-            "`!welcome <CLANTAG> [@user]`\n"
-            "Posts a welcome message in the clan’s channel and a short message in General.\n"
-            "Also available:\n"
-            "`!welcome-refresh` — reload templates from the sheet\n"
-            "`!welcome-on` / `!welcome-off` — toggle the module\n"
-            "`!welcome-status` — show current state\n"
-            "\n"
-            "Examples: `!welcome C1CM @user`, `!welcome f-it`"
+        "welcome-refresh": (
+            "`!welcome-refresh`\n"
+            "Admin/Recruitment Lead only. Reloads welcome templates from the sheet. Admin/Recruiter only."
+        ),
+        "welcome-on": (
+            "`!welcome-on`\n"
+            "Admin/Recruitment Lead only. Enable the welcome module. Admin/Recruiter only."
+        ),
+        "welcome-off": (
+            "`!welcome-off`\n"
+            "Admin/Recruitment Lead only. Disable the welcome module. Admin/Recruiter only."
+        ),
+        "welcome-status": (
+            "`!welcome-status`\n"
+            "Admin/Recruitment Lead only. Show current welcome module state (enabled/disabled + source)."
         ),
     }
 
-# --- overview help ---
+    # --- overview help ---
     if not topic:
         e = discord.Embed(
             title="C1C-Matchmaker — Help",
             description=(
                 "Helps recruiters place new players into the right clan, lets members browse open spots, "
                 "and handles onboarding welcomes.\n\n"
+                "Use `!help <command>` for detailed help (e.g., `!help clanmatch`, `!help welcome`)."
             ),
             color=discord.Color.blurple()
         )
@@ -1630,7 +1642,7 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
 
         e.add_field(
             name="For Recruiters",
-            value="`!clanmatch`, `!clan <tag>`",
+            value="`!clanmatch`, `!clan <tag>`, `!welcome`",
             inline=False
         )
         e.add_field(
@@ -1639,19 +1651,15 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
             inline=False
         )
         e.add_field(
-            name="Onboarding & Welcomes",
-            value="`!welcome`",
-            inline=False
-        )
-        e.add_field(
             name="Admin / Maintenance",
-            value="`!reload`, `!health`, `!ping`, `!welcome-refresh`, `!welcome-on`, `!welcome-off`, `!welcome-status`",
+            value="`!reload`, `!health`, `!ping`, "
+                  "`!welcome-refresh`, `!welcome-on`, `!welcome-off`, `!welcome-status`",
             inline=False
         )
-        e.set_footer(text="Note: Use `!help <command>` for detailed help (e.g., `!help clanmatch`, `!help welcome`).")
+        e.set_footer(text="Note: Panels are owner-locked — only the opener can use their panel.")
         return await ctx.reply(embed=e, mention_author=False)
 
-# --- specific help page ---
+    # --- specific help page ---
     txt = pages.get(topic)
     if not txt:
         log.warning("Unknown help topic requested: %s", topic)
@@ -1659,8 +1667,6 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
 
     e = discord.Embed(title=f"!help {topic}", description=txt, color=discord.Color.blurple())
     return await ctx.reply(embed=e, mention_author=False)
-
-
 
 # ------------------- Commands: panels -------------------
 async def _safe_delete(message: discord.Message):
@@ -2536,5 +2542,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
