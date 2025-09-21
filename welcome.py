@@ -28,7 +28,6 @@ async def log_to_channel(bot: commands.Bot, log_channel_id: int, level: str, msg
     except Exception:
         pass  # never recurse on log failures
 
-
 # ---------------- Emoji handling ----------------
 
 _EMOJI_TOKEN = re.compile(r"{EMOJI:([^}]+)}")
