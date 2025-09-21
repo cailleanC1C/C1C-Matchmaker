@@ -11,7 +11,6 @@ import discord
 from discord.ext import commands
 
 # ---------------- Logging ----------------
-
 def _fmt_kv(**kv) -> str:
     return " ".join(f"{k}={v}" for k, v in kv.items() if v is not None)
 
