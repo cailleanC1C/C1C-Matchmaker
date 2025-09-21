@@ -10,7 +10,6 @@ from typing import Callable, Dict, Any, List, Optional
 import discord
 from discord.ext import commands
 
-
 # ---------------- Logging ----------------
 
 def _fmt_kv(**kv) -> str:
