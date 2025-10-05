@@ -2043,12 +2043,12 @@ async def on_message_delete(message: discord.Message):
 
 # ------------------- Health / reload -------------------
 @bot.command(name="ping")
-async def ping(ctx):
-    # Admin or Recruitment Lead only
-    if not isinstance(ctx.author, discord.Member) or not _allowed_admin_or_lead(ctx.author):
-        await ctx.reply("⚠️ Only **Recruitment Lead** or Admins can use `!ping`.", mention_author=False)
-        return
-    await ctx.send("🏓 Pong — Live and listening.")
+async def ping(ctx: commands.Context):
+    # react-only liveness check
+    try:
+        await ctx.message.add_reaction("🏓")
+    except Exception:
+        pass
 
 
 @bot.command(name="health", aliases=["status"])
@@ -2542,6 +2542,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
