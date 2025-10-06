@@ -32,32 +32,102 @@ jobs:
           fi
           echo "file=$FILE" >> $GITHUB_OUTPUT
 
-      - name: Create standard labels (safe to re-run)
-        run: |
-          for L in \
-            "severity:critical" "severity:high" "severity:medium" "severity:low" \
-            "area:scheduler" "area:infra" "area:reminders" "area:data" "area:commands" "area:ops" "area:devx" \
-            "type:bug" "type:perf" "type:hardening" "type:security" "type:tooling"
-          do
-            gh label create "$L" --repo "${{ github.repository }}" --color cccccc --description "$L" || true
-          done
+      - name: Create labels and issues (GitHub API)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
 
-      - name: Normalize issues file to JSON
-        run: |
-          FILE="${{ steps.pick.outputs.file }}"
-          case "$FILE" in
-            *.yml|*.yaml) yq -o=json "$FILE" > issues.json ;;
-            *.json) cp "$FILE" issues.json ;;
-            *) echo "Unsupported file type: $FILE" >&2; exit 1 ;;
-          esac
+            // 1) Load normalized file
+            const data = JSON.parse(fs.readFileSync('issues.json','utf8'));
 
-      - name: Create issues from JSON array
-        run: |
-          jq -c '.[]' issues.json | while read -r item; do
-            title=$(jq -r '.title'  <<<"$item")
-            body=$(jq -r '.body'   <<<"$item")
-            labels=$(jq -r '.labels | join(",")' <<<"$item")
-            echo "Creating: $title"
-            gh issue create --repo "${{ github.repository }}" \
-              --title "$title" --label "$labels" --body "$body"
-          done
+            // 2) Normalize to a flat array of {title, body, labels, assignees}
+            let items = [];
+            let milestoneTitle = null;
+            let defaultLabels = [];
+            let defaultAssignees = [];
+
+            if (Array.isArray(data)) {
+              items = data;
+            } else if (data && typeof data === 'object' && Array.isArray(data.issues)) {
+              milestoneTitle   = data.milestone || null;
+              defaultLabels    = Array.isArray(data.defaults?.labels) ? data.defaults.labels : [];
+              defaultAssignees = Array.isArray(data.defaults?.assignees) ? data.defaults.assignees : [];
+              items = data.issues.map(it => {
+                const lbls = [...new Set([...(it.labels || []), ...defaultLabels])];
+                let body = it.body || "";
+                if (Array.isArray(it.acceptance_criteria) && it.acceptance_criteria.length) {
+                  body += "\n\nAcceptance\n- " + it.acceptance_criteria.join("\n- ");
+                }
+                const assignees = Array.isArray(it.assignees) ? it.assignees : defaultAssignees;
+                return { title: it.title, body, labels: lbls, assignees };
+              });
+            } else {
+              core.setFailed("Unsupported issues file format. Provide an array or {milestone, defaults, issues:[...] }.");
+              return;
+            }
+
+            core.info(`Found ${items.length} issues in batch`);
+
+            // 3) Ensure all labels exist (standard + custom)
+            const stdLabels = [
+              "severity:critical","severity:high","severity:medium","severity:low",
+              "area:scheduler","area:infra","area:reminders","area:data","area:commands","area:ops","area:devx",
+              "type:bug","type:perf","type:hardening","type:security","type:tooling"
+            ];
+            const custom = [...new Set(items.flatMap(i => i.labels || []))]
+              .filter(l => !stdLabels.includes(l));
+            const allLabels = [...new Set([...stdLabels, ...custom])];
+
+            for (const name of allLabels) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name, color: "cccccc", description: name
+                });
+                core.info(`Created label: ${name}`);
+              } catch (e) {
+                if (e.status === 422) core.info(`Label exists: ${name}`);
+                else core.warning(`Label "${name}" error: ${e.message}`);
+              }
+            }
+
+            // 4) Find or create milestone (optional)
+            let milestoneNumber = undefined;
+            if (milestoneTitle) {
+              const list = await github.rest.issues.listMilestones({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open"
+              });
+              const found = list.data.find(m => m.title === milestoneTitle);
+              if (found) {
+                milestoneNumber = found.number;
+                core.info(`Using milestone: ${milestoneTitle} (#${milestoneNumber})`);
+              } else {
+                const created = await github.rest.issues.createMilestone({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: milestoneTitle
+                });
+                milestoneNumber = created.data.number;
+                core.info(`Created milestone: ${milestoneTitle} (#${milestoneNumber})`);
+              }
+            }
+
+            // 5) Create issues
+            for (const it of items) {
+              const title  = it.title || "(missing title)";
+              const body   = it.body  || "";
+              const labels = Array.isArray(it.labels) ? it.labels : [];
+              const assignees = Array.isArray(it.assignees) ? it.assignees : [];
+
+              core.info(`Creating: ${title}`);
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title, body, labels, assignees,
+                milestone: milestoneNumber
+              });
+            }
