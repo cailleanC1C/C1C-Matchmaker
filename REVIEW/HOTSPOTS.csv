@@ -1,0 +1,3 @@
+file,path,function,start_line,end_line,complexity,loc,tags,notes
+bot_clanmatch_prefix.py,bot_clanmatch_prefix.py,ClanMatchView.search,1415,1557,18,135,"async-ui;sheet-access","Large control flow with blocking Sheets access; candidate for extraction into matcher service"
+bot_clanmatch_prefix.py,bot_clanmatch_prefix.py,build_recruiters_summary_embed,666,712,12,47,"reporting;sheets","Parses summary table manually; consider delegating to typed sheet adapter"
