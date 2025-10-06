@@ -1,0 +1,55 @@
+{
+  "milestone": "Stabilize-Matchmaker v1.0",
+  "defaults": {
+    "labels": ["docs"],
+    "assignees": []
+  },
+  "issues": [
+    {
+      "title": "P0 — De-block Google Sheets access in hot paths (F-01)",
+      "body": "Synchronous gspread calls in interaction handlers, daily poster, and !clan freeze the event loop and risk disconnects. See REVIEW.md (F-01) and FINDINGS.md. Move all Sheets work off the loop, track call sites, and add a latency regression test.",
+      "acceptance_criteria": [
+        "With 1–3s artificial Sheets delay, interactions remain responsive and heartbeats unaffected.",
+        "Daily poster fires on time.",
+        "Tests prove no direct sync I/O on the event loop in hot paths."
+      ],
+      "labels": ["P0-robustness", "tests", "matchmaker"]
+    },
+    {
+      "title": "P1 — Welcome log channel must be configurable (F-02)",
+      "body": "Replace hard-coded channel ID with environment-driven config (`WELCOME_LOG_CHANNEL_ID`, fallback `LOG_CHANNEL_ID`). Update README/ops. See REVIEW.md (F-02) and FINDINGS.md.",
+      "acceptance_criteria": [
+        "On a fresh guild with only env set, log posting goes to the configured channel.",
+        "Docs updated."
+      ],
+      "labels": ["P1-config", "docs", "welcome"]
+    },
+    {
+      "title": "P1 — Fail-fast HTTP health server startup (F-03)",
+      "body": "Ensure health server bind failures abort boot; add unit that attempts to bind an occupied port and asserts failure path; structured log on failure. See REVIEW.md (F-03).",
+      "acceptance_criteria": [
+        "Port conflict yields immediate boot failure with clear logs (port + exception).",
+        "CI test covers failure mode."
+      ],
+      "labels": ["P1-startup", "observability", "infra"]
+    },
+    {
+      "title": "P2 — Profile & prune remaining sync I/O; memoize header scans",
+      "body": "After F-01 lands, profile for any remaining sync I/O in hot paths; memoize `_locate_summary_headers` indices; document thumbnail fan-out limits. See PERF_NOTES.md.",
+      "acceptance_criteria": [
+        "Perf notes updated with before/after timings.",
+        "Header scan cost reduced >50% on refresh."
+      ],
+      "labels": ["perf", "maintenance"]
+    },
+    {
+      "title": "P2 — Logging hygiene & role-gate hardening (Threats)",
+      "body": "Redact sensitive sheet columns from logs; add structured fields (guild_id/message_id); prep decorators for future override/move flows (no behavior change yet). See THREATS.md.",
+      "acceptance_criteria": [
+        "Logs exclude raw PII while remaining traceable via IDs.",
+        "Threat doc updated to reflect mitigations."
+      ],
+      "labels": ["security", "observability", "docs"]
+    }
+  ]
+}
