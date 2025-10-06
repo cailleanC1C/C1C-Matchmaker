@@ -1,0 +1,63 @@
+name: Batch create issues
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Path to issues JSON or YAML inside this repo"
+        required: true
+        default: ".github/issue-batches/issues.json"
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure jq & yq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq yq || true
+
+      - name: Validate input file exists
+        id: pick
+        run: |
+          FILE="${{ github.event.inputs.file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "File not found: $FILE" >&2
+            exit 1
+          fi
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+
+      - name: Create standard labels (safe to re-run)
+        run: |
+          for L in \
+            "severity:critical" "severity:high" "severity:medium" "severity:low" \
+            "area:scheduler" "area:infra" "area:reminders" "area:data" "area:commands" "area:ops" "area:devx" \
+            "type:bug" "type:perf" "type:hardening" "type:security" "type:tooling"
+          do
+            gh label create "$L" --repo "${{ github.repository }}" --color cccccc --description "$L" || true
+          done
+
+      - name: Normalize issues file to JSON
+        run: |
+          FILE="${{ steps.pick.outputs.file }}"
+          case "$FILE" in
+            *.yml|*.yaml) yq -o=json "$FILE" > issues.json ;;
+            *.json) cp "$FILE" issues.json ;;
+            *) echo "Unsupported file type: $FILE" >&2; exit 1 ;;
+          esac
+
+      - name: Create issues from JSON array
+        run: |
+          jq -c '.[]' issues.json | while read -r item; do
+            title=$(jq -r '.title'  <<<"$item")
+            body=$(jq -r '.body'   <<<"$item")
+            labels=$(jq -r '.labels | join(",")' <<<"$item")
+            echo "Creating: $title"
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$title" --label "$labels" --body "$body"
+          done
