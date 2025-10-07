@@ -145,3 +145,70 @@
 - name: good first issue
   color: "7057ff"
   description: Low-risk starter task
+
+  # === Product (choose exactly one) ===
+- name: bot:reminder
+  color: "0052cc"
+  description: Reminder bot
+
+- name: bot:welcomecrew
+  color: "0052cc"
+  description: WelcomeCrew bot
+
+- name: bot:matchmaker
+  color: "0052cc"
+  description: Matchmaker bot
+
+- name: bot:achievements
+  color: "0052cc"
+  description: Achievements/Claims bot
+
+# === Components (one, maybe two if truly cross-cutting) ===
+- name: comp:commands
+  color: "7057ff"
+  description: Text/slash, permissions, UX
+
+- name: comp:scheduler
+  color: "0366d6"
+  description: Jobs, timers, offsets
+
+- name: comp:health
+  color: "1d76db"
+  description: Health endpoint, digest, diagnostics
+
+- name: comp:config
+  color: "006b75"
+  description: Env vars, toggles, secrets, YAML/JSON
+
+- name: comp:data-sheets
+  color: "168700"
+  description: Google Sheets schema, reads/writes, adapters
+
+- name: comp:cache
+  color: "0e8a16"
+  description: Caching layers / TTL / cold start
+
+- name: comp:roles
+  color: "c27ba0"
+  description: Role grants, achievements, approvals
+
+- name: comp:onboarding
+  color: "c27ba0"
+  description: Tickets, welcome flow, forms
+
+- name: comp:placement
+  color: "c27ba0"
+  description: Clan matching, recruiters, moves
+
+- name: comp:ocr
+  color: "5319e7"
+  description: Image parsing pipeline
+
+- name: comp:shards
+  color: "5319e7"
+  description: Shard/mercy tracking logic
+
+- name: comp:ops-contract
+  color: "6f42c1"
+  description: Shared ops parity: ping/health/digest/reload
+
