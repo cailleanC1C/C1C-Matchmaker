@@ -3,145 +3,145 @@
 
 # ===== Core issue types (system labels) =====
 - name: bug
-  color: d73a4a
+  color: "d73a4a"
   description: Broken behavior or incorrect output
 
 - name: perf
-  color: 0e8a16
+  color: "0e8a16"
   description: Performance regression or optimization
 
 - name: robustness
-  color: 0366d6
+  color: "0366d6"
   description: Resilience under load, retries, backoff, failure handling
 
 - name: security
-  color: b60205
+  color: "b60205"
   description: Vulnerability, secrets exposure, permissions/ACL issues
 
 - name: observability
-  color: 1d76db
+  color: "1d76db"
   description: Logging, metrics, traces, health, diagnostics
 
 - name: infra
-  color: 6f42c1
+  color: "6f42c1"
   description: Hosting, deployment, CI/CD, runtime environment
 
 - name: architecture
-  color: 5319e7
+  color: "5319e7"
   description: Cross-cutting design, interfaces, carve-outs
 
 - name: devx
-  color: c2e0c6
+  color: "c2e0c6"
   description: Developer experience, tooling friction, DX polish
 
 - name: docs
-  color: 0b75a8
+  color: "0b75a8"
   description: README, guides, runbooks, comments
 
 - name: lint
-  color: cccccc
+  color: "cccccc"
   description: Ruff/flake8/formatting cleanups
 
 - name: typecheck
-  color: bfdadc
+  color: "bfdadc"
   description: mypy/pyright typing issues
 
 - name: tests
-  color: a2eeef
+  color: "a2eeef"
   description: Unit/integration/e2e tests
 
 - name: commands
-  color: 7057ff
+  color: "7057ff"
   description: Text/slash command behavior, permissions, UX
 
 - name: data
-  color: 168700
+  color: "168700"
   description: Sheets schema, caching, adapters, migrations
 
 - name: config
-  color: 006b75
+  color: "006b75"
   description: Env vars, toggles, YAML/JSON config, secrets plumbing
 
 # ===== Priority (exactly one per issue) =====
 - name: P0
-  color: ee0701
+  color: "ee0701"
   description: CRITICAL — user-visible breakage / can’t ship
 
 - name: P1
-  color: fbca04
+  color: "fbca04"
   description: HIGH — core function degraded / urgent fix
 
 - name: P2
-  color: 0e8a16
+  color: "0e8a16"
   description: MEDIUM — important but not blocking
 
 - name: P3
-  color: cccccc
+  color: "cccccc"
   description: LOW — nice-to-have, cleanup, polish
 
 - name: P4
-  color: e6e6e6
+  color: "e6e6e6"
   description: VERY LOW — backlog/icebox
 
 # ===== Optional severity mirrors (use for dashboards; keep in sync with P-level) =====
 - name: severity:critical
-  color: ee0701
+  color: "ee0701"
   description: Mirrors P0
 
 - name: severity:high
-  color: d93f0b
+  color: "d93f0b"
   description: Mirrors P1
 
 - name: severity:medium
-  color: fbca04
+  color: "fbca04"
   description: Mirrors P2
 
 - name: severity:low
-  color: cccccc
+  color: "cccccc"
   description: Mirrors P3/P4
 
 # ===== Area labels (where it belongs) =====
 - name: area:reminder
-  color: 0052cc
+  color: "0052cc"
   description: Reminder bot / scheduler / modes
 
 - name: area:welcomecrew
-  color: 0052cc
+  color: "0052cc"
   description: WelcomeCrew bot / onboarding / tickets
 
 - name: area:matchmaker
-  color: 0052cc
+  color: "0052cc"
   description: Matchmaker bot / placement / recruiters
 
 - name: area:claims
-  color: 0052cc
+  color: "0052cc"
   description: Claims/Achievements bot
 
 - name: area:shards
-  color: 0052cc
+  color: "0052cc"
   description: Shard OCR & mercy tracking modules
 
 - name: area:ops
-  color: 0052cc
+  color: "0052cc"
   description: Shared ops/health/digest/reload contract
 
 # ===== Workflow helpers =====
 - name: needs:triage
-  color: fef2c0
+  color: "fef2c0"
   description: Awaiting label & priority
 
 - name: ready
-  color: 0e8a16
+  color: "0e8a16"
   description: Groomed and ready for pickup
 
 - name: blocked
-  color: b60205
+  color: "b60205"
   description: Blocked by dependency or decision
 
 - name: help wanted
-  color: 008672
+  color: "008672"
   description: Community contributions welcome
 
 - name: good first issue
-  color: 7057ff
+  color: "7057ff"
   description: Low-risk starter task
