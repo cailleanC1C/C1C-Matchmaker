@@ -9,41 +9,16 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
-      issues: write
       contents: read
-      metadata: read
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - name: Apply labels from registry
-        uses: actions/github-script@v7
+
+      # Uses a well-maintained action that reads YAML/JSON and syncs labels safely.
+      - name: Sync labels from registry
+        uses: EndBug/label-sync@v2
         with:
-          script: |
-            const fs = require('fs');
-            const labels = JSON.parse(JSON.stringify(
-              require('js-yaml').load(fs.readFileSync('.github/labels/labels.yml','utf8'))
-            ));
-            const { owner, repo } = context.repo;
-
-            // Fetch existing labels
-            const existing = await github.rest.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
-            const existingByName = new Map(existing.data.map(l => [l.name.toLowerCase(), l]));
-
-            for (const lbl of labels) {
-              const name = lbl.name;
-              const found = existingByName.get(name.toLowerCase());
-              const payload = { owner, repo, name, color: (lbl.color||'ededed').replace('#',''), description: lbl.description||'' };
-
-              if (found) {
-                await github.rest.issues.updateLabel({ owner, repo, current_name: found.name, ...payload });
-              } else {
-                await github.rest.issues.createLabel(payload);
-              }
-            }
-
-            // Optional: delete stray labels not in registry (safety off by default)
-            // const keep = new Set(labels.map(l=>l.name.toLowerCase()));
-            // for (const l of existing.data) {
-            //   if (!keep.has(l.name.toLowerCase())) {
-            //     await github.rest.issues.deleteLabel({ owner, repo, name: l.name });
-            //   }
-            // }
+          config-file: .github/labels/labels.yml
+          # Set to true after migration if you want to remove stray labels automatically.
+          sync-labels: false
