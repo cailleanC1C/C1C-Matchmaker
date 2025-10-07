@@ -1,4 +1,4 @@
-# C1C-Matchmaker
+# C1C-Matchmaker v1.0.1
 
 A Discord bot that helps recruiters place members into the right C1C clan, lets members browse open spots, and posts configurable welcome messages. It also exposes a tiny HTTP service (health checks + emoji-pad proxy) and has light housekeeping jobs.
 
