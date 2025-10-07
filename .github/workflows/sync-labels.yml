@@ -20,5 +20,4 @@ jobs:
         uses: EndBug/label-sync@v2
         with:
           config-file: .github/labels/labels.yml
-          # Set to true after migration if you want to remove stray labels automatically.
-          sync-labels: false
+          delete-other-labels: true
