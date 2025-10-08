@@ -1,0 +1,49 @@
+{
+  "milestone": "Guardrails v1 — Planning",
+  "defaults": {
+    "labels": ["bot:achievements", "docs", "ready", "comp:process"],
+    "assignees": []
+  },
+  "issues": [
+    {
+      "title": "Review guardrails inventory and gap analysis",
+      "body": "Walk through `REVIEW/BOOTSTRAP_GUARDRAILS/INVENTORY.md` and `GAP_ANALYSIS.md`. Capture questions, confirm scope, and document any missing context before migration planning is locked.",
+      "acceptance_criteria": [
+        "Inventory notes acknowledged by Docs, Architecture, and Ops representatives.",
+        "Gap severities agreed upon or updated with rationale.",
+        "Open questions tracked in follow-up discussion notes."
+      ],
+      "labels": []
+    },
+    {
+      "title": "Sign off on guardrails migration plan",
+      "body": "Review `REVIEW/BOOTSTRAP_GUARDRAILS/MIGRATION_PLAN.md` for completeness (scope, owners, sequencing, rollback). Approve or adjust effort estimates before implementation PRs are authorized.",
+      "acceptance_criteria": [
+        "Named owners or teams recorded for each plan artifact.",
+        "Sequencing approved with dependencies captured.",
+        "Rollback approach validated by Ops/DevOps."
+      ],
+      "labels": []
+    },
+    {
+      "title": "Validate docs map and glossary accuracy",
+      "body": "Cross-check `docs/DOCS_MAP.md` and `docs/DOCS_GLOSSARY.md` against the repository. Ensure file listings, purpose statements, and definitions reflect current state and desired conventions.",
+      "acceptance_criteria": [
+        "File listings in DOCS_MAP match repository contents.",
+        "Glossary definitions agreed upon by stakeholders.",
+        "Any future sections needing updates are tagged with owners."
+      ],
+      "labels": []
+    },
+    {
+      "title": "Authorize transition to guardrails implementation phase",
+      "body": "Hold planning review to confirm readiness for implementation work (docs drafting, label canon creation, module reviews). Capture meeting notes and formal approval to proceed via follow-up batch.",
+      "acceptance_criteria": [
+        "Planning stakeholders sign off on proceeding to implementation.",
+        "Outstanding risks documented with mitigation owners.",
+        "Next-phase issue batch or project board link shared."
+      ],
+      "labels": []
+    }
+  ]
+}
