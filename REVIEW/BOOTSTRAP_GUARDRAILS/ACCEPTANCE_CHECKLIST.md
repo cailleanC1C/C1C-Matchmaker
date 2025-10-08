@@ -1,14 +1,22 @@
-# Guardrails Planning — Acceptance Checklist
+# Guardrails Planning Acceptance Checklist
 
-- [ ] `docs/ENGINEERING.md` exists, references ADR guidance, and links to CODEOWNERS plus `docs/DOCS_MAP.md`.
-- [ ] `docs/DEVELOPMENT.md` exists and cites guardrails workflows defined in `docs/ENGINEERING.md` and relevant ADRs.
-- [ ] `docs/ADR/` directory exists with an index (`README.md` or similar) and at least one ADR template.
-- [ ] `docs/DOCS_MAP.md` lists all global docs, ADRs, review packs, issue batches, workflows, and labels canon with correct paths.
-- [ ] `docs/DOCS_GLOSSARY.md` defines ADR, Acceptance Checklist, Batch Issues, Guardrails CI, Structure Lint, and other core terms.
-- [ ] `.github/labels/harmonized.json` exists and active repository labels are a subset of this canon.
-- [ ] `.github/issue-batches/guardrails-rollout.json` is merged and dedicated to planning-only tasks.
-- [ ] `.github/issue-batches/` includes a follow-up implementation batch or tracking plan referencing guardrails rollout.
-- [ ] `.github/` contains CODEOWNERS and aligned PR/issue templates referencing the guardrails docs.
-- [ ] `REVIEW/MODULE_*/` directories exist for each major subsystem or an explicit N/A justification is documented.
-- [ ] Legacy review artifacts either migrated or cross-linked from module directories; stale duplicates removed or archived.
-- [ ] Workflows in `.github/workflows/` documented in docs and validated against new guardrails requirements.
+## Documentation
+- [ ] `docs/README.md` and `docs/OPERATIONS.md` describe doc placement, config scaffolding, and link back to guardrails artifacts.
+- [ ] `docs/ADR/` exists with README + template committed.
+- [ ] `docs/DOCS_MAP.md` and `docs/DOCS_GLOSSARY.md` reflect the final document tree.
+
+## Module Guardrails
+- [ ] `REVIEW/MODULE_matchmaker/` includes scope, checklist, and dependencies for `bot_clanmatch_prefix.py`.
+- [ ] `REVIEW/MODULE_welcome/` includes scope, checklist, and dependencies for `welcome.py`.
+
+## Labels & Issue Batches
+- [ ] `.github/labels/harmonized.json` aligns with `labels.json` and is referenced by documentation.
+- [ ] `.github/issue-batches/` files use only canonical labels and document any mappings.
+
+## Automation Alignment
+- [ ] `.github/workflows/sync-labels.yml` monitors the correct path (`labels.json`) and manual runbook is documented.
+- [ ] Guardrails plan captures CI/test workflow next steps (even if deferred).
+
+## Sign-off
+- [ ] Docs/Architecture/DevX stakeholders approve the updated guardrails plan.
+- [ ] Guardrails issue batch refreshed and linked in planning notes.

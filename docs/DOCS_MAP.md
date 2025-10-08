@@ -1,75 +1,34 @@
 # Documentation Map
 
-_Last updated: 2025-10-08_
+## Repository Guides
+- `README.md` — product overview, features, env configuration (root; relocate guidance pending guardrails decision).
+- `CHANGELOG.md` — release notes (root).
+- `docs/README.md` *(planned in migration)* — docs structure + guardrails orientation.
+- `docs/OPERATIONS.md` *(planned)* — runtime/config expectations and missing scaffolding tracker.
+- `docs/ADR/` *(planned)* — architecture decision record home with template.
 
-## Global Docs
-- **Purpose**: Define engineering and development guardrails plus supporting references.
-- **Location pattern**: `docs/*.md` (top-level).
-- **Naming conventions**: Uppercase filenames (e.g., `ENGINEERING.md`, `DEVELOPMENT.md`, `DOCS_MAP.md`).
-- **Create when…**: Establishing or updating organization-wide practices, onboarding references, or navigation aids.
-- **Current files (2)**:
-  - `docs/DOCS_MAP.md`
-  - `docs/DOCS_GLOSSARY.md`
+## Guardrails & Review Assets
+- `REVIEW/REVIEW.md` — prior audit summary.
+- `REVIEW/ARCH_MAP.md` — component overview.
+- `REVIEW/FINDINGS.md` — prioritized issues.
+- `REVIEW/PERF_NOTES.md` — performance notes.
+- `REVIEW/TESTPLAN.md` — current testing strategy gaps.
+- `REVIEW/THREATS.md` — threat modelling summary.
+- `REVIEW/TODOS.md` — outstanding tasks backlog.
+- `REVIEW/HOTSPOTS.csv`, `REVIEW/LINT_REPORT.md`, `REVIEW/TYPECHECK_REPORT.md` — generated analysis artifacts.
+- `REVIEW/BOOTSTRAP_GUARDRAILS/*.md` — guardrails planning set (inventory, gaps, migration plan, acceptance checklist).
+- *(Planned)* `REVIEW/MODULE_matchmaker/` & `REVIEW/MODULE_welcome/` — module-specific guardrails once created.
 
-## ADRs
-- **Purpose**: Record architectural decisions with context and consequences.
-- **Location pattern**: `docs/ADR/*.md`.
-- **Naming conventions**: `ADR-<NNN>-<short-title>.md` with chronological numbering.
-- **Create when…**: Committing to significant technical decisions requiring traceability.
-- **Current files (0)**: _None_
+## Automation & Issue Planning
+- `.github/issue-batches/issues.json` — general issue batch (needs label canon cleanup).
+- `.github/issue-batches/guardrails-rollout.json` — guardrails planning batch (overwritten by this audit).
+- `.github/labels/labels.json` — canonical labels registry.
+- `.github/labels/harmonized.json` *(planned)* — harmonized label metadata.
+- `.github/workflows/*.yml` — automation entry points (batch issues, label sync, migrations, project sync).
 
-## Module Reviews
-- **Purpose**: Capture per-module findings, plans, and acceptance criteria for guardrails compliance.
-- **Location pattern**: `REVIEW/MODULE_*/**`.
-- **Naming conventions**: Directory per module (e.g., `MODULE_MATCHMAKER/`), containing `PLAN.md`, `CHECKLIST.md`, etc.
-- **Create when…**: Initiating module-specific guardrails rollout or audit.
-- **Current files (legacy)**:
-  - `REVIEW/ARCH_MAP.md`
-  - `REVIEW/FINDINGS.md`
-  - `REVIEW/HOTSPOTS.csv`
-  - `REVIEW/LINT_REPORT.md`
-  - `REVIEW/PERF_NOTES.md`
-  - `REVIEW/REVIEW.md`
-  - `REVIEW/TESTPLAN.md`
-  - `REVIEW/THREATS.md`
-  - `REVIEW/TODOS.md`
-  - `REVIEW/TYPECHECK_REPORT.md`
-  - `REVIEW/BOOTSTRAP_GUARDRAILS/INVENTORY.md`
-  - `REVIEW/BOOTSTRAP_GUARDRAILS/GAP_ANALYSIS.md`
-  - `REVIEW/BOOTSTRAP_GUARDRAILS/MIGRATION_PLAN.md`
-  - `REVIEW/BOOTSTRAP_GUARDRAILS/ACCEPTANCE_CHECKLIST.md`
+## Reference Lists & Glossary
+- `docs/DOCS_GLOSSARY.md` — shared terminology across guardrails and docs.
 
-## Issue Batches
-- **Purpose**: Group related GitHub issues for phased rollout tracking.
-- **Location pattern**: `.github/issue-batches/*.json|yml`.
-- **Naming conventions**: `<initiative>.json` with kebab-case names.
-- **Create when…**: Planning or executing multi-issue initiatives that need batch creation.
-- **Current files (2)**:
-  - `.github/issue-batches/issues.json`
-  - `.github/issue-batches/guardrails-rollout.json`
-
-## Workflows
-- **Purpose**: Automate guardrail enforcement, synchronization, and governance.
-- **Location pattern**: `.github/workflows/*.yml`.
-- **Naming conventions**: Kebab-case YAML files describing the workflow purpose.
-- **Create when…**: Automations are needed to enforce or support guardrails.
-- **Current files (4)**:
-  - `.github/workflows/add-to-cross-bot-project.yml`
-  - `.github/workflows/batch-issues.yml`
-  - `.github/workflows/migrate-labels.yml`
-  - `.github/workflows/sync-labels.yml`
-
-## Labels Canon
-- **Purpose**: Define the authoritative label set for the repository.
-- **Location pattern**: `.github/labels/*.json` (target: `harmonized.json`).
-- **Naming conventions**: Single canon file named `harmonized.json` with sorted label entries.
-- **Create when…**: Establishing or updating the official label taxonomy used by automation and contributors.
-- **Current files (1)**:
-  - `.github/labels/labels.json` _(legacy filename)_
-
-## Static Assets
-- **Purpose**: Store diagrams, images, and other non-text assets referenced by docs.
-- **Location pattern**: `docs/assets/**` or module-specific `assets/` directories.
-- **Naming conventions**: Lowercase descriptive filenames with hyphens.
-- **Create when…**: Visual aids are required for guardrails comprehension.
-- **Current files (0)**: _None_
+## Pending Additions Called Out in Migration Plan
+- Tests/automation documentation once CI plan is defined.
+- Module checklists and supporting runbooks for each runtime surface.

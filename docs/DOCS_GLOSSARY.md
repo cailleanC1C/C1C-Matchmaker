@@ -1,12 +1,14 @@
 # Documentation Glossary
 
-_Last updated: 2025-10-08_
-
-- **ADR (Architecture Decision Record)**: A lightweight document that captures the context, decision, and consequences for a significant architectural choice. Stored under `docs/ADR/` using sequential numbering.
-- **Acceptance Checklist**: A verifiable list of conditions that must be met before closing out a guardrails phase. Lives alongside the relevant review or rollout plan.
-- **Batch Issues**: Predefined sets of GitHub issues described in `.github/issue-batches/*.json|yml` that can be bulk-created to drive initiatives.
-- **Guardrails CI**: Automated workflows in `.github/workflows/` that enforce or verify compliance with the documented guardrails.
-- **Structure Lint**: Planned automation that validates repository structure (e.g., docs locations, naming conventions) against the target guardrails layout.
-- **Module Review Pack**: Collection of module-scoped artifacts (`REVIEW/MODULE_*/`) combining inventories, plans, and checklists for a subsystem.
-- **Labels Canon**: The authoritative list of GitHub labels (`.github/labels/harmonized.json`) ensuring automation and issue batches use consistent naming.
-- **Planning Pack**: The documentation set (inventory, gap analysis, migration plan, acceptance checklist) produced before implementing guardrails changes.
+| Term | Definition |
+|------|------------|
+| **Guardrails** | The documentation + automation framework that enforces baseline quality for the bot family (inventory, gap analysis, migration plans, acceptance gates). |
+| **Module Guardrails** | Per-surface folders under `REVIEW/MODULE_*` that enumerate responsibilities, dependencies, and checklists for each runtime component. |
+| **Canon Labels** | The authoritative set of GitHub labels declared in `.github/labels/labels.json` (and future `harmonized.json`) that all automation and issue batches must use. |
+| **Issue Batch** | JSON/YAML file consumed by `batch-issues.yml` to seed GitHub issues with shared defaults. |
+| **Harmonized Labels** | Extended metadata file required by guardrails to align label names, colors, and semantics across repos. Missing today; scheduled in migration plan. |
+| **ADR (Architecture Decision Record)** | Lightweight document stored under `docs/ADR/` that captures context, decision, and consequences for architectural changes. |
+| **Planning Wave** | Guardrails rollout phase focusing on documentation + automation alignment before implementation work begins. |
+| **Automation Drift** | Mismatches between workflow assumptions and repo state (e.g., `sync-labels.yml` watching the wrong path). |
+| **Surface Map** | Overview of code pathways and dependencies within a module; required for module guardrails. |
+| **Acceptance Checklist** | Final gating list verifying that plan deliverables are complete before moving to implementation. |
