@@ -2462,11 +2462,26 @@ async def emoji_pad_handler(request: web.Request):
     except Exception as e:
         return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
 
+
+# Keep a handle to the runner so we can shut the web app down cleanly.
+_WEB_RUNNER: web.AppRunner | None = None
+
 async def start_webserver():
+    """
+    Starts the tiny aiohttp web server and stores the runner globally so we can
+    call cleanup() on shutdown. This avoids 'Unclosed client session' errors.
+    """
+    global _WEB_RUNNER
+
     app = web.Application()
     app["session"] = ClientSession()
-    async def _close_session(app):
-        await app["session"].close()
+
+    async def _close_session(app_):
+        try:
+            await app_["session"].close()
+        except Exception as e:
+            print(f"[keepalive] HTTP client session close failed: {type(e).__name__}: {e}", flush=True)
+
     app.on_cleanup.append(_close_session)
 
 # Platform-safe defaults:
@@ -2489,10 +2504,32 @@ async def start_webserver():
 
     runner = web.AppRunner(app)
     await runner.setup()
+    _WEB_RUNNER = runner
+
     port = int(os.environ.get("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
+
+
+async def stop_webserver():
+    """
+    Cleanly shuts down the aiohttp web app (if running), which triggers our
+    on_cleanup hook to close the shared ClientSession/connector.
+    """
+    global _WEB_RUNNER
+    runner = _WEB_RUNNER
+    _WEB_RUNNER = None
+
+    if runner is None:
+        return
+
+    try:
+        await runner.cleanup()
+        print("[keepalive] HTTP server shut down cleanly", flush=True)
+    except Exception as e:
+        print(f"[keepalive] HTTP server cleanup failed: {type(e).__name__}: {e}", flush=True)
+
 
 # --------------- Integration of welcome.py for welcome messages --------------------------
 from welcome import Welcome  # or: from modules.welcome import Welcome
@@ -2527,9 +2564,27 @@ _WELCOME_ADDED = False
 _WELCOME_PRIMED = False
 
 # ------------------- Boot both -------------------
+
+async def _maybe_restart(reason: str):
+    try:
+        log.warning(f"[WATCHDOG] Restarting: {reason}")
+    except NameError:
+        print(f"[WATCHDOG] Restarting: {reason}")
+    # Try to shut down the webserver cleanly first so the shared ClientSession is closed.
+    try:
+        await stop_webserver()
+    except Exception as e:
+        print(f"[WATCHDOG] webserver shutdown error: {type(e).__name__}: {e}", flush=True)
+    try:
+        await bot.close()
+    finally:
+        sys.exit(1)
+
 async def main():
     try:
+        # Start the tiny webserver in the background
         asyncio.create_task(start_webserver())
+
         token = os.environ.get("DISCORD_TOKEN", "").strip()
         if not token or len(token) < 50:
             raise RuntimeError("Missing/short DISCORD_TOKEN.")
@@ -2539,10 +2594,13 @@ async def main():
         print("[boot] FATAL:", e, flush=True)
         traceback.print_exc()
         raise
+    finally:
+        # On any shutdown path, try to cleanly stop the webserver so aiohttp
+        # can run its cleanup hooks and close the shared ClientSession.
+        try:
+            await stop_webserver()
+        except Exception as e:
+            print(f"[boot] webserver shutdown error: {type(e).__name__}: {e}", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
