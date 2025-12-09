@@ -2300,11 +2300,14 @@ async def _watchdog():
 
 # ------------------- Tiny web server + image-pad proxy -------------------
 
+_WEB_RUNNER: web.AppRunner | None = None
+
+
 def _last_event_age_s() -> int | None:
     return int(_now() - _LAST_EVENT_TS) if _LAST_EVENT_TS else None
 
+
 async def _health_json(_req):
-# 200 when connected; 503 when disconnected; 206 “partial” if zombie hint
     connected = BOT_CONNECTED
     age = _last_event_age_s()
     latency = None
@@ -2316,9 +2319,8 @@ async def _health_json(_req):
         latency = None
 
     status = 200 if connected else 503
-    # Heuristic: connected but no events for >600s and latency None/huge → partial
     if connected and age is not None and age > 600 and (latency is None or latency > 10):
-        status = 206  # “partial content” -> signals zombie-ish to your monitor
+        status = 206
 
     body = {
         "ok": connected,
@@ -2329,8 +2331,8 @@ async def _health_json(_req):
     }
     return web.json_response(body, status=status)
 
+
 async def _health_json_ok_always(_req):
-# Same payload as _health_json, but always HTTP 200 to avoid host flaps.
     connected = BOT_CONNECTED
     age = _last_event_age_s()
     try:
@@ -2338,6 +2340,7 @@ async def _health_json_ok_always(_req):
         latency = float(latency) if latency is not None else None
     except Exception:
         latency = None
+
     body = {
         "ok": connected,
         "connected": connected,
@@ -2347,6 +2350,7 @@ async def _health_json_ok_always(_req):
         "strict_probe": STRICT_PROBE,
     }
     return web.json_response(body, status=200)
+
 
 async def emoji_pad_handler(request: web.Request):
     """
@@ -2381,10 +2385,11 @@ async def emoji_pad_handler(request: web.Request):
     if parsed.scheme not in {"http", "https"} or host not in ALLOWED_EMOJI_HOSTS:
         return web.Response(status=400, text="invalid source host")
 
+    timeout = ClientTimeout(total=8)
+
     # ---------------------------
     # 🚨 FIX: Per-request session
     # ---------------------------
-    timeout = ClientTimeout(total=8)
     try:
         async with ClientSession(timeout=timeout) as session:
             async with session.get(
@@ -2392,7 +2397,6 @@ async def emoji_pad_handler(request: web.Request):
                 allow_redirects=False,
                 headers={"User-Agent": "c1c-matchmaker/emoji-pad"},
             ) as resp:
-
                 if resp.status != 200:
                     return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
 
@@ -2400,7 +2404,6 @@ async def emoji_pad_handler(request: web.Request):
                 if not ctype.startswith("image/"):
                     return web.Response(status=415, text="unsupported media type")
 
-                # enforce byte cap
                 if resp.content_length and resp.content_length > EMOJI_MAX_BYTES:
                     return web.Response(status=413, text="image too large")
 
@@ -2449,31 +2452,26 @@ async def emoji_pad_handler(request: web.Request):
     )
 
 
-
-# Keep a handle to the runner so we can shut the web app down cleanly.
-_WEB_RUNNER: web.AppRunner | None = None
-
 async def start_webserver():
     """
-    Starts the tiny aiohttp web server and stores the runner globally so we can
-    call cleanup() on shutdown. This avoids 'Unclosed client session' errors.
+    Starts aiohttp webserver and stores runner for proper shutdown.
     """
     global _WEB_RUNNER
 
     app = web.Application()
+
+    # Shared session (now properly closed on shutdown!)
     app["session"] = ClientSession()
 
     async def _close_session(app_):
         try:
             await app_["session"].close()
         except Exception as e:
-            print(f"[keepalive] HTTP client session close failed: {type(e).__name__}: {e}", flush=True)
+            print(f"[keepalive] session close error: {e}", flush=True)
 
     app.on_cleanup.append(_close_session)
 
-# Platform-safe defaults:
-# - When STRICT_PROBE=0 (default): `/`, `/ready`, `/health` always 200
-# - When STRICT_PROBE=1: platform probes use deep status (200/206/503)
+    # Routes
     if STRICT_PROBE:
         app.router.add_get("/", _health_json)
         app.router.add_get("/ready", _health_json)
@@ -2483,10 +2481,7 @@ async def start_webserver():
         app.router.add_get("/ready", _health_json_ok_always)
         app.router.add_get("/health", _health_json_ok_always)
 
-# Deep health endpoint for your monitoring/alerts (can return 206 on zombie-ish)
     app.router.add_get("/healthz", _health_json)
-
-# Existing emoji pad proxy
     app.router.add_get("/emoji-pad", emoji_pad_handler)
 
     runner = web.AppRunner(app)
@@ -2496,26 +2491,27 @@ async def start_webserver():
     port = int(os.environ.get("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[keepalive] HTTP server listening on :{port} | STRICT_PROBE={int(STRICT_PROBE)}", flush=True)
+
+    print(f"[keepalive] webserver running on :{port}", flush=True)
 
 
 async def stop_webserver():
     """
-    Cleanly shuts down the aiohttp web app (if running), which triggers our
-    on_cleanup hook to close the shared ClientSession/connector.
+    Properly shuts down the webserver.
+    Ensures cleanup hooks fire and shared session closes.
     """
     global _WEB_RUNNER
     runner = _WEB_RUNNER
     _WEB_RUNNER = None
 
-    if runner is None:
+    if not runner:
         return
 
     try:
         await runner.cleanup()
-        print("[keepalive] HTTP server shut down cleanly", flush=True)
+        print("[keepalive] webserver shut down cleanly", flush=True)
     except Exception as e:
-        print(f"[keepalive] HTTP server cleanup failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[keepalive] webserver shutdown error: {e}", flush=True)
 
 
 # --------------- Integration of welcome.py for welcome messages --------------------------
@@ -2591,4 +2587,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
