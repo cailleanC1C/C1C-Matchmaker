@@ -2348,34 +2348,30 @@ async def _health_json_ok_always(_req):
     }
     return web.json_response(body, status=200)
 
-
 async def emoji_pad_handler(request: web.Request):
     """
-    /emoji-pad?u=<emoji_cdn_url>&s=<int canvas>&box=<0..1 glyph fraction>&v=<cache-buster>
-    Downloads the emoji, trims transparent borders, scales to (s*box), centers on s×s canvas.
-    Now with SSRF + size/time guards.
+    /emoji-pad?u=<emoji_url>&s=<size>&box=<ratio>
+    Fully safe version: per-request ClientSession to avoid leaked connectors.
     """
     src = request.query.get("u")
-
-# Clamp inputs to prevent abuse / CPU spikes
-    s_raw = request.query.get("s")
-    try:
-        size = int(s_raw) if s_raw is not None else EMOJI_PAD_SIZE
-    except Exception:
-        size = EMOJI_PAD_SIZE
-    size = max(64, min(512, size))  # 64–512px canvas
-
-    b_raw = request.query.get("box")
-    try:
-        box = float(b_raw) if b_raw is not None else EMOJI_PAD_BOX
-    except Exception:
-        box = EMOJI_PAD_BOX
-    box = max(0.2, min(0.95, box))  # 20%–95% glyph fill
-
     if not src:
         return web.Response(status=400, text="missing u")
 
-# ---- URL validation (SSRF protection)
+    # clamp size
+    try:
+        size = int(request.query.get("s", EMOJI_PAD_SIZE))
+    except Exception:
+        size = EMOJI_PAD_SIZE
+    size = max(64, min(512, size))
+
+    # clamp box
+    try:
+        box = float(request.query.get("box", EMOJI_PAD_BOX))
+    except Exception:
+        box = EMOJI_PAD_BOX
+    box = max(0.2, min(0.95, box))
+
+    # validate allowed host
     try:
         parsed = urlparse(src)
     except Exception:
@@ -2385,82 +2381,73 @@ async def emoji_pad_handler(request: web.Request):
     if parsed.scheme not in {"http", "https"} or host not in ALLOWED_EMOJI_HOSTS:
         return web.Response(status=400, text="invalid source host")
 
+    # ---------------------------
+    # 🚨 FIX: Per-request session
+    # ---------------------------
+    timeout = ClientTimeout(total=8)
     try:
-        # Tight network timeout; no redirects (avoid hop to untrusted hosts)
-        timeout = ClientTimeout(total=8)
-        async with request.app["session"].get(
-            src,
-            timeout=timeout,
-            allow_redirects=False,
-            headers={"User-Agent": "c1c-matchmaker/emoji-pad"}
-        ) as resp:
-            if resp.status != 200:
-                return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
+        async with ClientSession(timeout=timeout) as session:
+            async with session.get(
+                src,
+                allow_redirects=False,
+                headers={"User-Agent": "c1c-matchmaker/emoji-pad"},
+            ) as resp:
 
-            # Content-Type must be an image
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            if not ctype.startswith("image/"):
-                return web.Response(status=415, text="unsupported media type")
+                if resp.status != 200:
+                    return web.Response(status=resp.status, text=f"fetch failed: {resp.status}")
 
-            # Enforce byte cap before reading
-            if resp.content_length is not None and resp.content_length > EMOJI_MAX_BYTES:
-                return web.Response(status=413, text="image too large")
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if not ctype.startswith("image/"):
+                    return web.Response(status=415, text="unsupported media type")
 
-            # Stream-read with cap
-            buf = bytearray()
-            async for chunk in resp.content.iter_chunked(65536):
-                buf.extend(chunk)
-                if len(buf) > EMOJI_MAX_BYTES:
+                # enforce byte cap
+                if resp.content_length and resp.content_length > EMOJI_MAX_BYTES:
                     return web.Response(status=413, text="image too large")
-            raw = bytes(buf)
 
-# ---- Image processing
-        try:
-            img = Image.open(io.BytesIO(raw))
-        except Exception as e:
-            return web.Response(status=415, text=f"cannot parse image: {type(e).__name__}")
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(65536):
+                    buf.extend(chunk)
+                    if len(buf) > EMOJI_MAX_BYTES:
+                        return web.Response(status=413, text="image too large")
+                raw = bytes(buf)
 
-# Convert to RGBA (handles PNG/WEBP/GIF first frame, etc.)
-        try:
-            img = img.convert("RGBA")
-        except Exception:
-            # Some formats need load() before convert
-            img.load()
-            img = img.convert("RGBA")
-
-# Trim transparent borders so glyph is truly centered
-        alpha = img.split()[-1]
-        bbox = alpha.getbbox()
-        if bbox:
-            img = img.crop(bbox)
-
-# Scale glyph to fit target “box” inside the square canvas
-        w, h = img.size
-        max_side = max(w, h) or 1
-        target   = max(1, int(size * box))
-        scale    = target / float(max_side)
-        new_w    = max(1, int(w * scale))
-        new_h    = max(1, int(h * scale))
-        img = img.resize((new_w, new_h), RESAMPLE_LANCZOS)
-
-        canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        x = (size - new_w) // 2
-        y = (size - new_h) // 2
-        canvas.paste(img, (x, y), img)
-
-        out = io.BytesIO()
-        canvas.save(out, format="PNG")
-        return web.Response(
-            body=out.getvalue(),
-            headers={"Cache-Control": "public, max-age=86400"},
-            content_type="image/png",
-        )
-
-# Network / PIL fallbacks
     except asyncio.TimeoutError:
         return web.Response(status=504, text="image fetch timeout")
     except Exception as e:
-        return web.Response(status=500, text=f"err {type(e).__name__}: {e}")
+        return web.Response(status=500, text=f"network error: {type(e).__name__}: {e}")
+
+    # ---- Image processing
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception:
+        return web.Response(status=415, text="cannot parse image")
+
+    alpha = img.split()[-1]
+    bbox = alpha.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    w, h = img.size
+    max_side = max(w, h)
+    target = int(size * box)
+    scale = target / max_side
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    img = img.resize((new_w, new_h), RESAMPLE_LANCZOS)
+
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.paste(img, ((size - new_w) // 2, (size - new_h) // 2), img)
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")
+
+    return web.Response(
+        body=out.getvalue(),
+        headers={"Cache-Control": "public, max-age=86400"},
+        content_type="image/png",
+    )
+
 
 
 # Keep a handle to the runner so we can shut the web app down cleanly.
@@ -2604,3 +2591,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
