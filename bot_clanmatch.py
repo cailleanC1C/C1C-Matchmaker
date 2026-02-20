@@ -194,8 +194,8 @@ COL_P_CB, COL_Q_HYDRA, COL_R_CHIM, COL_S_CVC, COL_T_SIEGE, COL_U_STYLE = 15, 16,
 # Entry Criteria V–AB
 IDX_V, IDX_W, IDX_X, IDX_Y, IDX_Z, IDX_AA, IDX_AB = 21, 22, 23, 24, 25, 26, 27
 
-# AC / AD / AE add-ons
-IDX_AC_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 28, 29, 30
+# AD / AE add-ons + AH reserved
+IDX_AH_RESERVED, IDX_AD_COMMENTS, IDX_AE_REQUIREMENTS = 33, 29, 30
 # AF
 IDX_AF_INACTIVES = 31
 
@@ -433,7 +433,7 @@ def make_embed_for_row_classic(row, filters_text: str, guild: discord.Guild | No
     tag      = (row[COL_C_TAG]  or "").strip()
     spots    = (row[COL_E_SPOTS] or "").strip()
     inactives = (row[IDX_AF_INACTIVES] if len(row) > IDX_AF_INACTIVES else "").strip()
-    reserved = (row[IDX_AC_RESERVED] or "").strip()
+    reserved = (row[IDX_AH_RESERVED] if len(row) > IDX_AH_RESERVED else "").strip()
     comments = (row[IDX_AD_COMMENTS] or "").strip()
     addl_req = (row[IDX_AE_REQUIREMENTS] or "").strip()
 
